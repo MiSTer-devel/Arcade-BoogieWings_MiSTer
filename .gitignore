@@ -1,0 +1,36 @@
+# Public release: si committa SOLO il SORGENTE (GPL, open). Gli artefatti di build/release
+# (output Quartus, .rbf, .zip, log, db) NON vanno nel repo.
+
+# Quartus output / build artifacts
+output_files/
+db/
+incremental_db/
+*.qws
+*.rpt
+*.smsg
+*.summary
+*.jdi
+*.pin
+*.sof
+*.rbf
+*.sld
+*.done
+*.qdf
+*.qpf.bak
+c5_pin_model_dump.txt
+
+# Build logs
+build_*.log
+fb_output.log
+
+# Release bundle (binari)
+*.zip
+
+# JTAG config locale
+jtag.cdf
+
+# ROM binaries (mai committare)
+sim/c[0-9]*
+sim/*.hex
+sim/work/
+sim/transcript
