@@ -85,7 +85,6 @@ end
 reg [31:0] ss_saved_ssp;
 reg [31:0] ss_restore_ssp;
 reg [15:0] ss_reset_vector [0:3];
-reg        ss_read_done = 1'b0;
 
 // Stato globale via ssbus: salva ss_saved_ssp (1 valore 32-bit), ripristina ss_restore_ssp.
 always @(posedge clk) begin
@@ -165,10 +164,12 @@ assign ss_restore_done = (ss_state == SST_IDLE) && (ss_state_d == SST_RESTORE_WA
 
 always @(posedge clk) begin
 	ss_mem_write <= 1'b0;
-	ss_mem_read  <= 1'b0;
+	// ss_mem_read NON azzerato di default: e' un livello gestito dentro gli stati restore
+	// (alzato in WAIT_PAUSE, abbassato in WAIT_READ su ss_busy) come F2 (pulse puro, no auto-clear).
 
 	case (ss_state)
 		SST_IDLE: begin
+			ss_mem_read <= 1'b0;   // livello pulito a riposo (no auto-clear globale, come F2 reg ss_read=0)
 			if (do_save)    ss_state <= SST_SAVE_WAIT_PAUSE;
 			if (do_restore) ss_state <= SST_RESTORE_WAIT_PAUSE;
 		end
@@ -181,7 +182,10 @@ always @(posedge clk) begin
 		end
 
 		SST_RESTORE_WAIT_PAUSE: begin
-			if (paused_real) ss_state <= SST_RESTORE_WAIT_READ;
+			if (paused_real) begin
+				ss_mem_read <= 1'b1;   // pulse puro come F2 (F2.sv:346): alza read entrando in WAIT_READ
+				ss_state <= SST_RESTORE_WAIT_READ;
+			end
 		end
 
 		// SAVE: forza IRQ7 (ss_irq). Attende l'IACK liv7 (la CPU riconosce l'eccezione).
@@ -215,15 +219,16 @@ always @(posedge clk) begin
 		end
 
 		// RESTORE: memory_stream carica da DDR (ricarica RAM + ss_restore_ssp via ssbus).
+		// Pulse puro IDENTICO a F2 (F2.sv:351-363): read alzato in WAIT_PAUSE; qui si abbassa
+		// quando memory_stream diventa busy, poi si avanza quando ha finito. Niente ss_read_done.
 		SST_RESTORE_WAIT_READ: begin
-			ss_mem_read <= (ss_state == SST_RESTORE_WAIT_READ) & ~ss_busy & ~ss_mem_read & ~ss_read_done;
-			if (ss_busy) ss_read_done <= 1'b1;
-			else if (ss_read_done) begin
+			if (ss_busy & ss_mem_read) begin
+				ss_mem_read <= 1'b0;
+			end else if (~ss_busy & ~ss_mem_read) begin
 				ss_reset_vector[0] <= ss_restore_ssp[31:16];
 				ss_reset_vector[1] <= ss_restore_ssp[15:0];
 				ss_reset_vector[2] <= 16'h00FF;  // PC reset = 0x00FF0000 (handler restart point)
 				ss_reset_vector[3] <= 16'h0008;
-				ss_read_done <= 1'b0;
 				ss_reset_counter <= 5'd0;
 				ss_state <= SST_RESTORE_HOLD_RST;
 			end

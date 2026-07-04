@@ -99,7 +99,8 @@ jt6295_rom u_rom(
     // ROM interface
     .rom_addr   ( rom_addr      ),
     .rom_data   ( rom_data      ),
-    .rom_ok     ( rom_ok        )
+    .rom_ok     ( rom_ok        ),
+    .auto_ss_wr ( auto_ss_wr    )
 );
 
 // CPU interface

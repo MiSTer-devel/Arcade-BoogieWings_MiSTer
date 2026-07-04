@@ -25,11 +25,12 @@
 //         Audio output = 0 finché non istanziati YM/OKI.
 
 module boogwings_audio #(
-	parameter integer SS_HUC_RAM_IDX = 0,
-	parameter integer SS_HUC_CPU_IDX = 0,
-	parameter integer SS_OKI0_IDX    = 0,
-	parameter integer SS_OKI1_IDX    = 0,
-	parameter integer SS_YM_IDX      = 0
+	parameter integer SS_HUC_RAM_IDX   = 0,
+	parameter integer SS_HUC_CPU_IDX   = 0,
+	parameter integer SS_OKI0_IDX      = 0,
+	parameter integer SS_OKI1_IDX      = 0,
+	parameter integer SS_YM_IDX        = 0,
+	parameter integer SS_AUDIO_BUS_IDX = 0
 ) (
 	input  wire        clk,             // clk_sys (96 MHz)
 	input  wire        reset,
@@ -38,7 +39,22 @@ module boogwings_audio #(
 	input  wire        ce_ym_p1,        // ~1.79 MHz (jt51 cen_p1)
 	input  wire        ce_oki0,         // ~1.0 MHz (OKI #0, PIN7_HIGH)
 	input  wire        ce_oki1,         // ~2.0 MHz (OKI #1, PIN7_HIGH)
-	input  wire        pause,           // paused_safe (frame-aligned): stalla la HUC6280 via RDY
+	// Savestate fase contatori ce (da Template): SAVE = valori in; RESTORE = valori out + load pulse.
+	// Salvare la fase dei contatori fa ripartire HuC+chip dalla STESSA fase del save (audio in sync).
+	input  wire [3:0]  ce_audio_cnt_in,
+	input  wire [4:0]  ce_ym_cnt_in,
+	input  wire        ce_ym_toggle_in,
+	input  wire [6:0]  ce_oki0_cnt_in,
+	input  wire [5:0]  ce_oki1_cnt_in,
+	output wire [3:0]  ce_audio_cnt_load,
+	output wire [4:0]  ce_ym_cnt_load,
+	output wire        ce_ym_toggle_load,
+	output wire [6:0]  ce_oki0_cnt_load,
+	output wire [5:0]  ce_oki1_cnt_load,
+	output wire        ce_cnt_load_wr,   // pulse: ricarica i contatori in Template
+	input  wire        pause,           // paused_safe (frame-aligned): gate UNICO audio (= obj_paused F2).
+	                                    // Ferma HuC (CE_IN), chip (ce gated), FIFO soundlatch -> tutto
+	                                    // si ferma e riparte nello STESSO ciclo. La HuC via CE_IN (divisore congelato), non RDY.
 
 	// Soundlatch dalla CPU principale (via DECO104)
 	input  wire [7:0]  soundlatch_data,
@@ -82,7 +98,9 @@ module boogwings_audio #(
 	ssbus_if.slave     ss_oki0,
 	ssbus_if.slave     ss_oki1,
 	// Savestate: stato interno YM2151 (jt51, auto_ss 2774 bit).
-	ssbus_if.slave     ss_ym
+	ssbus_if.slave     ss_ym,
+	// Savestate: stato persistente wrapper audio (FIFO sndlatch + YM/OKI ctrl, 161 bit).
+	ssbus_if.slave     ss_audio_bus
 );
 
 // Default gain chip = build bh5jtcf1r ridotti di -1 dB (×0.891):
@@ -197,7 +215,11 @@ wire wait_n = 1'b1;
 // trasparente (addr=cpu_addr, write=is_ram&~cpu_wr_n, data=cpu_dout).
 wire        ss_huc_sel  = ss_huc_ram.access(SS_HUC_RAM_IDX);
 wire [12:0] ram_addr    = ss_huc_sel ? ss_huc_ram.addr[12:0] : cpu_addr[12:0];
-wire        ram_we      = ss_huc_sel ? ss_huc_ram.write      : (is_ram & ~cpu_wr_n);
+// ram_we gated da ~pause: se la pausa cade a meta' di una write RAM, WR_N resta congelato
+// basso -> senza gate la write stantia RISCRIVE ogni clk la RAM appena restaurata dal
+// chunk HUC_RAM (che precede il chunk HUC_CPU che riallinea gli strobe) = 1 byte corrotto.
+// In pausa utente sopprime solo riscritture idempotenti (stesso dato). A pause=0 identico.
+wire        ram_we      = ss_huc_sel ? ss_huc_ram.write      : (is_ram & ~cpu_wr_n & ~pause);
 wire [7:0]  ram_wdata   = ss_huc_sel ? ss_huc_ram.data[7:0]  : cpu_dout;
 
 always @(posedge clk) ram_rd_r <= ram_mem[ram_addr];
@@ -229,15 +251,35 @@ reg        sl_pulse_d, sl_rd_d;
 wire       sl_rd_lvl = is_snd && ~cpu_rd_n;
 wire       sl_empty  = (sl_wptr == sl_rptr);
 wire       sl_full   = (sl_wptr[4] != sl_rptr[4]) && (sl_wptr[3:0] == sl_rptr[3:0]);
+// soundlatch_irq_pulse NON gated: durante il SS il 68k (mini-handler) NON scrive il soundlatch
+// (solo stack), quindi gatare il push perderebbe un comando (BUCO 2). Edge-detect su pulse diretto.
+// sl_pulse_d/sl_rd_d sono salvati nel SS -> al restore nessun edge spurio. Trasparente a SS spento.
 wire       sl_push   = (soundlatch_irq_pulse & ~sl_pulse_d) & ~sl_full;   // rising-edge, no overflow
 wire       sl_pop    = (~sl_rd_lvl & sl_rd_d) & ~sl_empty;                // falling-edge read
 
+integer sl_i;
 always @(posedge clk) begin
-	sl_pulse_d <= soundlatch_irq_pulse;
+	sl_pulse_d <= soundlatch_irq_pulse;   // edge-detect sul pulse diretto (no comando perso al SS)
 	sl_rd_d    <= sl_rd_lvl;
 	if (reset) begin
 		sl_wptr <= 5'd0;
 		sl_rptr <= 5'd0;
+	end else if (audio_bus_ss_wr) begin
+		// RESTORE savestate (priorita'): carica FIFO + puntatori + edge-detect. Stesso ordine del
+		// save (fifo[i] da bit [8*i+:8]). Gioco in pausa -> push/pop disabilitati in questo ciclo.
+		// sl_pulse_d/sl_rd_d ripristinati COERENTI (vincono sulle assegnazioni 240-241 di questo
+		// stesso always) -> nessun edge artificiale sul soundlatch_irq al restore -> no push spurio.
+		for (sl_i = 0; sl_i < 16; sl_i = sl_i + 1)
+			sndlatch_fifo[sl_i] <= ab_fifo_flat_load[8*sl_i +: 8];
+		sl_wptr    <= ab_sl_wptr_load;
+		sl_rptr    <= ab_sl_rptr_load;
+		sl_pulse_d <= ab_sl_pulse_d_load;
+		// sl_rd_d: NON dal save ma dal livello VIVO. Il valore salvato appartiene alla macchina
+		// salvata, ma sl_rd_lvl qui riflette gli strobe della sessione corrente (gia' riallineati
+		// allo stato restaurato dal chunk 20, che precede questo): caricare il valore salvato
+		// creerebbe un falso falling-edge = pop spurio (comando audio perso). d==lvl -> nessun
+		// edge per costruzione; gli edge successivi sono quelli reali della CPU ripresa.
+		sl_rd_d    <= sl_rd_lvl;
 	end else begin
 		if (sl_push) begin
 			sndlatch_fifo[sl_wptr[3:0]] <= soundlatch_data;
@@ -277,9 +319,13 @@ localparam [12:0] YM_BUSY_TICKS = 13'd7680;  // ~80us @ 96MHz (80e-6*96e6)
 reg [12:0] ym_busy_cnt;
 wire ym_data_wr = is_ym & cpu_addr[0] & ~cpu_wr_n & cpu_ce_pulse;  // write al data reg (a0=1)
 always @(posedge clk) begin
-	if (reset)            ym_busy_cnt <= 13'd0;
-	else if (ym_data_wr)  ym_busy_cnt <= YM_BUSY_TICKS;       // arma busy su write data
-	else if (ym_busy_cnt != 13'd0) ym_busy_cnt <= ym_busy_cnt - 13'd1;
+	if (reset)               ym_busy_cnt <= 13'd0;
+	else if (audio_bus_ss_wr) ym_busy_cnt <= ab_ym_busy_cnt_load;   // restore (priorita')
+	else if (ym_data_wr)     ym_busy_cnt <= YM_BUSY_TICKS;          // arma busy su write data
+	// decremento gated da ~pause: il busy modella tempo-CHIP (jt51 congelato in pausa) -> se
+	// scala a 96MHz in pausa scade in anticipo (write FM ravvicinata al resume) e al save
+	// viene catturato gia' decaduto. A pause=0 identico al baseline.
+	else if (ym_busy_cnt != 13'd0 && !pause) ym_busy_cnt <= ym_busy_cnt - 13'd1;
 end
 wire ym_busy_local = (ym_busy_cnt != 13'd0);
 // dout letto dall'H6280: bit7 = busy reale jt51 OR busy locale (back-pressure).
@@ -318,12 +364,15 @@ jt51 u_ym (
 // =====================================================================
 reg [7:0] ym_last_reg;
 always @(posedge clk) begin
-	if (is_ym && ~cpu_addr[0] && ~cpu_wr_n && cpu_ce_pulse)  // 1 ck, bus stabile
+	if (audio_bus_ss_wr)                                     // restore (priorita')
+		ym_last_reg <= ab_ym_last_reg_load;
+	else if (is_ym && ~cpu_addr[0] && ~cpu_wr_n && cpu_ce_pulse)  // 1 ck, bus stabile
 		ym_last_reg <= cpu_dout;
 end
 reg [1:0] oki_bank_bits;        // {CT2, CT1}
 always @(posedge clk) begin
 	if (reset) oki_bank_bits <= 2'd0;
+	else if (audio_bus_ss_wr) oki_bank_bits <= ab_oki_bank_load;   // restore (priorita')
 	else if (is_ym && cpu_addr[0] && ~cpu_wr_n && cpu_ce_pulse && ym_last_reg == 8'h1B)
 		oki_bank_bits <= cpu_dout[7:6];   // {CT2, CT1}
 end
@@ -440,21 +489,31 @@ always @(posedge clk) begin
 		oki0_fetch_is_next<= 1'b0;
 		oki0_rom_ok       <= 1'b0;
 	end else begin
-		// 1) Ack del fetch: latch nella current o nella next a seconda del tipo
+		// 1) Ack del fetch: latch nella current o nella next a seconda del tipo.
+		//    In pausa/SS la req in volo si CHIUDE comunque (fetch_busy scende -> quiescenza,
+		//    no deadlock) ma il DATO viene scartato (tag non scritti): apparterrebbe al bank
+		//    pre-restore. Al resume: miss pulito -> refetch col bank definitivo.
 		if (oki0_fetch_busy && oki0_ddr_ack_match) begin
-			if (oki0_fetch_is_next) begin
-				oki0_word_n      <= oki0_ddr_data;
-				oki0_word_n_addr <= oki0_addr_pending[17:2];
-			end else begin
-				oki0_word        <= oki0_ddr_data;
-				oki0_word_addr   <= oki0_addr_pending[17:2];
+			if (!pause) begin
+				if (oki0_fetch_is_next) begin
+					oki0_word_n      <= oki0_ddr_data;
+					oki0_word_n_addr <= oki0_addr_pending[17:2];
+				end else begin
+					oki0_word        <= oki0_ddr_data;
+					oki0_word_addr   <= oki0_addr_pending[17:2];
+				end
 			end
 			oki0_fetch_busy <= 1'b0;
 		end
 
 		// 2) jt6295 e' avanzato alla parola NEXT (gia' precaricata): promuovi next->current
 		//    (shift) senza round-trip DDR. Avviene quando current non e' piu' hit ma next si'.
-		if (!oki0_fetch_busy && !oki0_word_hit && oki0_word_n_hit) begin
+		// SS: promozione e scheduler (sotto) gated con !pause (paused_safe): in pausa/SS il
+		// bridge NON lancia nuove req ne' rimescola lo stato (il restore jt6295 cambia rom_addr
+		// sotto ss_hold: una req lanciata li' resterebbe PENDENTE per tutta la finestra SS,
+		// ddram_ss_idle=0 — verificato in SIM, tb_oki_ss_bridge). Il ramo ack (1) resta SEMPRE
+		// vivo: la req in volo si chiude e ss_idle puo' salire. A pause=0 gating inerte.
+		if (!pause && !oki0_fetch_busy && !oki0_word_hit && oki0_word_n_hit) begin
 			oki0_word      <= oki0_word_n;
 			oki0_word_addr <= oki0_word_n_addr;
 			oki0_word_n_addr <= 16'hFFFF;   // next ora va riprefetchata
@@ -464,7 +523,7 @@ always @(posedge clk) begin
 		oki0_rom_ok <= (oki0_word_hit || oki0_word_n_hit) && !oki0_fetch_busy;
 
 		// 4) Scheduler fetch (1 richiesta per volta, priorita' alla CURRENT):
-		if (!oki0_fetch_busy) begin
+		if (!pause && !oki0_fetch_busy) begin
 			if (!oki0_word_hit && !oki0_word_n_hit) begin
 				// miss totale: fetch la current SUBITO
 				oki0_addr_pending  <= oki0_rom_addr;
@@ -478,6 +537,17 @@ always @(posedge clk) begin
 				oki0_req_toggle    <= ~oki0_req_toggle;
 				oki0_fetch_busy    <= 1'b1;
 			end
+		end
+
+		// Restore: invalida i tag della cache al load del CHIP (chunk OKI0, che PRECEDE il
+		// chunk AUDIO_BUS col bank): il tag e' solo addr[17:2] SENZA il bank, e la FSM ctrl
+		// del jt6295 gira a clk pieno anche in pausa — con tag stantii vedrebbe rom_ok=1 e
+		// consumerebbe rom_data del bank/della sessione vecchia subito dopo il proprio load.
+		// Tag invalidi -> rom_ok=0 -> FSM ferma fino al resume. Pulse solo al restore.
+		if (oki0_ss_wr) begin
+			oki0_word_addr   <= 16'hFFFF;
+			oki0_word_n_addr <= 16'hFFFF;
+			oki0_rom_ok      <= 1'b0;   // il registro rom_ok valuterebbe i tag PRE-invalidazione
 		end
 	end
 end
@@ -517,18 +587,22 @@ always @(posedge clk) begin
 		oki1_fetch_is_next<= 1'b0;
 		oki1_rom_ok       <= 1'b0;
 	end else begin
+		// Ack: chiude sempre, dato scartato in pausa (come OKI0)
 		if (oki1_fetch_busy && oki1_ddr_ack_match) begin
-			if (oki1_fetch_is_next) begin
-				oki1_word_n      <= oki1_ddr_data;
-				oki1_word_n_addr <= oki1_addr_pending[17:2];
-			end else begin
-				oki1_word        <= oki1_ddr_data;
-				oki1_word_addr   <= oki1_addr_pending[17:2];
+			if (!pause) begin
+				if (oki1_fetch_is_next) begin
+					oki1_word_n      <= oki1_ddr_data;
+					oki1_word_n_addr <= oki1_addr_pending[17:2];
+				end else begin
+					oki1_word        <= oki1_ddr_data;
+					oki1_word_addr   <= oki1_addr_pending[17:2];
+				end
 			end
 			oki1_fetch_busy <= 1'b0;
 		end
 
-		if (!oki1_fetch_busy && !oki1_word_hit && oki1_word_n_hit) begin
+		// SS: promozione+scheduler gated con !pause, ramo ack sempre vivo (come OKI0)
+		if (!pause && !oki1_fetch_busy && !oki1_word_hit && oki1_word_n_hit) begin
 			oki1_word        <= oki1_word_n;
 			oki1_word_addr   <= oki1_word_n_addr;
 			oki1_word_n_addr <= 16'hFFFF;
@@ -536,7 +610,7 @@ always @(posedge clk) begin
 
 		oki1_rom_ok <= (oki1_word_hit || oki1_word_n_hit) && !oki1_fetch_busy;
 
-		if (!oki1_fetch_busy) begin
+		if (!pause && !oki1_fetch_busy) begin
 			if (!oki1_word_hit && !oki1_word_n_hit) begin
 				oki1_addr_pending  <= oki1_rom_addr;
 				oki1_fetch_is_next <= 1'b0;
@@ -548,6 +622,13 @@ always @(posedge clk) begin
 				oki1_req_toggle    <= ~oki1_req_toggle;
 				oki1_fetch_busy    <= 1'b1;
 			end
+		end
+
+		// Restore: invalida i tag cache al load del chip (come OKI0)
+		if (oki1_ss_wr) begin
+			oki1_word_addr   <= 16'hFFFF;
+			oki1_word_n_addr <= 16'hFFFF;
+			oki1_rom_ok      <= 1'b0;   // come OKI0
 		end
 	end
 end
@@ -569,11 +650,11 @@ always @(*) begin
 end
 
 // =====================================================================
-// Savestate stato interno HUC6280 (auto_ss, 246 bit) — pattern F2 (auto_save_adaptor su Z80).
+// Savestate stato interno HUC6280 (auto_ss) — pattern F2 (auto_save_adaptor su Z80).
 // A SS idle huc_ss_wr=0 -> il chip e' trasparente. Durante restore huc_ss_wr pulsa (CPU ferma
 // in paused_safe) -> il chip ricarica i suoi registri da huc_ss_in.
 // =====================================================================
-localparam integer HUC_SS_BITS = 254;   // 246 + CPU_CLK_CNT(5) + IO_CLK_CNT(3) = fase divisori
+localparam integer HUC_SS_BITS = 298;   // 252 core+AG+CS+SavedC+MI(42) + stato top(38) + CPU_CLK_CNT(5) + IO_CLK_CNT(3)
 wire [HUC_SS_BITS-1:0] huc_ss_out, huc_ss_in;
 wire                   huc_ss_wr;
 auto_save_adaptor #(.N_BITS(HUC_SS_BITS), .SS_IDX(SS_HUC_CPU_IDX)) u_huc_ss_adaptor (
@@ -598,13 +679,52 @@ auto_save_adaptor #(.N_BITS(OKI_SS_BITS), .SS_IDX(SS_OKI1_IDX)) u_oki1_ss_adapto
 );
 
 // YM2151 (jt51) stato interno — auto_ss 2774 bit.
-localparam integer YM_SS_BITS = 2780;   // 2774 + busy_cnt(5)+busy(1) = fase flag BUSY YM
+localparam integer YM_SS_BITS = 2820;   // 2780 + write-staging(40) = up_*/op_din/reg_sel in volo
 wire [YM_SS_BITS-1:0] ym_ss_out, ym_ss_in;
 wire                  ym_ss_wr;
 auto_save_adaptor #(.N_BITS(YM_SS_BITS), .SS_IDX(SS_YM_IDX)) u_ym_ss_adaptor (
 	.clk(clk), .ssbus(ss_ym),
 	.bits_in(ym_ss_out), .bits_out(ym_ss_in), .bits_wr(ym_ss_wr)
 );
+
+// Audio bus wrapper state — 161 bit di stato PERSISTENTE non interno ai chip:
+//   FIFO sndlatch 16x8 (128) + sl_wptr[4:0]+sl_rptr[4:0] (10) + ym_busy_cnt[12:0] (13)
+//   + ym_last_reg[7:0] (8) + oki_bank_bits[1:0] (2). Senza, al restore i comandi audio in
+//   coda spariscono e bank/busy YM si perdono -> audio muto/glitch (causa validata).
+// 186 bit: 163 base (FIFO+ctrl+edge) + 23 fase contatori ce ([185:163]).
+//   [185:180] ce_oki1_cnt(6)  [179:173] ce_oki0_cnt(7)  [172] ce_ym_toggle  [171:167] ce_ym_cnt(5)
+//   [166:163] ce_audio_cnt(4)  [162] sl_rd_d  [161] sl_pulse_d  [160:0] base (vedi sotto)
+localparam integer AUDIO_BUS_SS_BITS = 186;
+wire [AUDIO_BUS_SS_BITS-1:0] audio_bus_ss_out, audio_bus_ss_in;
+wire                         audio_bus_ss_wr;
+auto_save_adaptor #(.N_BITS(AUDIO_BUS_SS_BITS), .SS_IDX(SS_AUDIO_BUS_IDX)) u_audio_bus_ss_adaptor (
+	.clk(clk), .ssbus(ss_audio_bus),
+	.bits_in(audio_bus_ss_out), .bits_out(audio_bus_ss_in), .bits_wr(audio_bus_ss_wr)
+);
+// SAVE: FIFO (fifo[i] in [8*i+7:8*i]) + registri + fase contatori ce (dai _in, da Template).
+wire [127:0] fifo_flat;
+genvar gi;
+generate for (gi = 0; gi < 16; gi = gi + 1) begin : g_fifo_flat
+	assign fifo_flat[8*gi +: 8] = sndlatch_fifo[gi];
+end endgenerate
+assign audio_bus_ss_out = {ce_oki1_cnt_in, ce_oki0_cnt_in, ce_ym_toggle_in, ce_ym_cnt_in, ce_audio_cnt_in,
+                           sl_rd_d, sl_pulse_d, oki_bank_bits, ym_last_reg, ym_busy_cnt, sl_rptr, sl_wptr, fifo_flat};
+// RESTORE: scompatta con lo STESSO ordine (endianness identica al save).
+wire [1:0]   ab_oki_bank_load    = audio_bus_ss_in[160:159];
+wire [7:0]   ab_ym_last_reg_load = audio_bus_ss_in[158:151];
+wire [12:0]  ab_ym_busy_cnt_load = audio_bus_ss_in[150:138];
+wire [4:0]   ab_sl_rptr_load     = audio_bus_ss_in[137:133];
+wire [4:0]   ab_sl_wptr_load     = audio_bus_ss_in[132:128];
+wire [127:0] ab_fifo_flat_load   = audio_bus_ss_in[127:0];
+wire         ab_sl_pulse_d_load  = audio_bus_ss_in[161];
+wire         ab_sl_rd_d_load     = audio_bus_ss_in[162];
+// RESTORE fase contatori ce -> output verso Template (caricati quando ce_cnt_load_wr pulsa).
+assign ce_audio_cnt_load  = audio_bus_ss_in[166:163];
+assign ce_ym_cnt_load     = audio_bus_ss_in[171:167];
+assign ce_ym_toggle_load  = audio_bus_ss_in[172];
+assign ce_oki0_cnt_load   = audio_bus_ss_in[179:173];
+assign ce_oki1_cnt_load   = audio_bus_ss_in[185:180];
+assign ce_cnt_load_wr     = audio_bus_ss_wr;   // pulse restore -> Template ricarica i contatori
 
 // =====================================================================
 // H6280 instance
@@ -613,10 +733,14 @@ auto_save_adaptor #(.N_BITS(YM_SS_BITS), .SS_IDX(SS_YM_IDX)) u_ym_ss_adaptor (
 // gate per simulare clock divisorio.
 HUC6280 u_cpu (
 	.CLK    (clk),
+	.CE_IN  (~pause),       // cen come F2: a gioco normale (pause=0) CE_IN=1 -> divisore gira a clk
+	                        // pieno (96/24=4MHz, identico originale). In pausa/SS (pause=paused_safe=1)
+	                        // CE_IN=0 -> divisore CONGELATO (CPU_CLK_CNT fermo) -> la HuC non deriva di
+	                        // fase: al restore riparte IN FASE. Fixa le note lunghe (key-off off-phase).
 	.RST_N  (~reset),
 	.WAIT_N (wait_n),       // Stall durante ROM read fino a dato pronto (pattern ActFancer)
-	.RDY    (~pause),       // pause (paused_safe): RDY=0 stalla la HUC pulito (HUC6280.vhd:127,183
-	                        // CE <= CPU_CE and CPU_RDY; CPU_RDY <= RDY a confine ciclo, stato mantenuto)
+	.RDY    (1'b1),         // RDY non piu' usato per la pausa (la fa CE_IN). Neutro su BoogieWings:
+	                        // la HuC non accede a VDC/VCE (0xFF0000+), il wait-state video non scatta mai.
 	.DI     (cpu_din),
 	.NMI_N  (1'b1),
 	.IRQ1_N (irq1_n),       // soundlatch IRQ (MAME IRQ0 → H6280 IRQ1)

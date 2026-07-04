@@ -12,6 +12,7 @@ use work.HUC6280_PKG.all;
 entity HUC6280 is
 	port( 
 		CLK		: in std_logic;
+		CE_IN		: in std_logic;   -- clock-enable esterno (cen, come Z80 F2): il divisore avanza solo se CE_IN=1
 		RST_N		: in std_logic;
 		WAIT_N	: in std_logic;
 		SX      : out std_logic;
@@ -44,11 +45,11 @@ entity HUC6280 is
 		AUD_RDATA: out std_logic_vector(23 downto 0);
 
 		-- Savestate (auto_ss, pattern F2): SS_WR=0 -> trasparente; SS_WR=1 (CPU ferma) -> load.
-		-- 254 bit = CPU_CLK_CNT(5) + IO_CLK_CNT(3) + CPU core+AG (208) + stato top (38).
+		-- 256 bit = CPU_CLK_CNT(5) + IO_CLK_CNT(3) + CPU core+AG+CS+SavedC (210) + stato top (38).
 		-- I 2 divisori di clock (CPU_CLK_CNT/IO_CLK_CNT) determinano la FASE del ciclo macchina:
 		-- vanno salvati o la HuC riprende off-phase dai registri ricaricati -> muto 1-su-2.
-		SS_DO		: out std_logic_vector(253 downto 0);
-		SS_DI		: in  std_logic_vector(253 downto 0);
+		SS_DO		: out std_logic_vector(297 downto 0);
+		SS_DI		: in  std_logic_vector(297 downto 0);
 		SS_WR		: in  std_logic
 	);
 end HUC6280;
@@ -95,11 +96,12 @@ architecture rtl of HUC6280 is
 	signal TMR_IRQ 		: std_logic;
 	signal TMR_IRQ_ACK 	: std_logic;
 
-	-- Savestate: divisori clock (8) + CPU core propagato (208) + stato top (38) = 254.
-	signal CPU_SS_DO		: std_logic_vector(207 downto 0);
-	-- Mappa bit (254): i nuovi 8 bit in TESTA, mappe esistenti INVARIATE.
-	--   [253:249] CPU_CLK_CNT(5)  [248:246] IO_CLK_CNT(3)   <- NUOVI (fase ciclo macchina)
-	--   [245:38] CPU core+AG (invariato)
+	-- Savestate: divisori clock (8) + CPU core propagato (252: +CS +SavedC +MI) + stato top (38) = 298.
+	signal CPU_SS_DO		: std_logic_vector(251 downto 0);
+	signal SS_WR_D			: std_logic;   -- SS_WR ritardato 1 ck: riallinea WR_N/RD_N post-restore
+	-- Mappa bit (298): fase divisori in TESTA, stato top [37:0] INVARIATO.
+	--   [297:293] CPU_CLK_CNT(5)  [292:290] IO_CLK_CNT(3)   (fase ciclo macchina)
+	--   [289:38] CPU core+AG+CS+SavedC+MI (252 bit; era 210, +42 per la microistruzione MI)
 	--   stato top SS_DI(37 downto 0): [37:35] INT_MASK  [34:28] TMR_VALUE  [27:21] TMR_LATCH
 	--   [20:11] TMR_PRE_CNT  [10] TMR_EN  [9] TMR_RELOAD  [8] TMR_IRQ  [7:0] IO_BUF
 
@@ -117,37 +119,48 @@ begin
 			SX    <= '0';
 		elsif rising_edge(CLK) then
 			CPU_CE <= '0';
-			if (CPU_CLK_CNT = 2 and CPU_CS = '1') or (CPU_CLK_CNT = 11 and CPU_CS = '0') then
-				SX <= '1';
-			else
-				SX <= '0';
-			end if;
-			if (CPU_CLK_CNT = 5 and CPU_CS = '1') or (CPU_CLK_CNT = 23 and CPU_CS = '0') then
-				if WAIT_N = '1' then
-					CPU_CLK_CNT <= (others=>'0');
-					CPU_CE <= '1';
-				end if; 
-			else
-				CPU_CLK_CNT <= CPU_CLK_CNT + 1;
-			end if; 
-			
+			-- Strobe azzerati FUORI dal gate (come CPU_CE): se CE_IN cade nel loro ciclo attivo
+			-- resterebbero STUCK a 1 per tutta la pausa (IO_CE=1 -> timer conta a 96 MHz in pausa
+			-- = campi TMR_* del savestate strappati/rimescolati; prob. 1/6 per pausa).
 			CPU_CER <= '0';
-			if CPU_CLK_CNT = 1 then
-				CPU_CER <= '1';
-			end if; 
-			
 			IO_CE <= '0';
-			IO_CLK_CNT <= IO_CLK_CNT + 1;
-			if IO_CLK_CNT = 5 then
-				IO_CLK_CNT <= (others=>'0');
-				IO_CE <= '1';
+			SX    <= '0';
+			-- Gate cen esterno (CE_IN): il divisore avanza SOLO se CE_IN=1 -> in pausa/SS la HuC
+			-- si ferma dal cen (come lo Z80 di F2 con .cen), NON via RDY asincrono.
+			if CE_IN = '1' then
+				if (CPU_CLK_CNT = 2 and CPU_CS = '1') or (CPU_CLK_CNT = 11 and CPU_CS = '0') then
+					SX <= '1';
+				else
+					SX <= '0';
+				end if;
+				if (CPU_CLK_CNT = 5 and CPU_CS = '1') or (CPU_CLK_CNT = 23 and CPU_CS = '0') then
+					if WAIT_N = '1' then
+						CPU_CLK_CNT <= (others=>'0');
+						CPU_CE <= '1';
+					end if;
+				else
+					CPU_CLK_CNT <= CPU_CLK_CNT + 1;
+				end if;
+
+				CPU_CER <= '0';
+				if CPU_CLK_CNT = 1 then
+					CPU_CER <= '1';
+				end if;
+
+				IO_CE <= '0';
+				IO_CLK_CNT <= IO_CLK_CNT + 1;
+				if IO_CLK_CNT = 5 then
+					IO_CLK_CNT <= (others=>'0');
+					IO_CE <= '1';
+				end if;
 			end if;
 
 			-- Savestate restore: ricarica la FASE dei divisori (ultima assegnazione = priorita').
+			-- Fuori dal gate CE_IN: il restore deve poter ricaricare anche a cen fermo (chip stopped).
 			-- Senza questo la HuC riprende off-phase dai registri ricaricati -> muto 1-su-2.
 			if SS_WR = '1' then
-				CPU_CLK_CNT <= unsigned(SS_DI(253 downto 249));
-				IO_CLK_CNT  <= unsigned(SS_DI(248 downto 246));
+				CPU_CLK_CNT <= unsigned(SS_DI(297 downto 293));
+				IO_CLK_CNT  <= unsigned(SS_DI(292 downto 290));
 			end if;
 		end if;
 	end process;
@@ -176,13 +189,20 @@ begin
 		CS 		=> CPU_CS,
 		VDCNUM   => VDCNUM,
 		SS_DO		=> CPU_SS_DO,
-		SS_DI		=> SS_DI(245 downto 38),   -- bit alti = stato CPU core (208)
+		SS_DI		=> SS_DI(289 downto 38),   -- bit alti = stato CPU core (252: +CS +SavedC +MI)
 		SS_WR		=> SS_WR
 	);
 	
 	CPU_IRQ1_N <= IRQ1_N or INT_MASK(1);
 	CPU_IRQ2_N <= IRQ2_N or INT_MASK(0);
-	CPU_IRQT_N <= not TMR_IRQ or INT_MASK(2);
+	-- FIX tempo-drift (classe Dark Seal, verificato sul disasm della sound ROM BoogieWings):
+	-- il timer interno e' SOLO un guard anti-rientro armato dentro l'handler IRQ2 (uniche
+	-- scritture a $0C01 in 64KB), mai metronomo (il metronomo e' l'IRQ2/YM Timer B). Nel core
+	-- il guard scattava (finestra 256us vs 508+us arcade, busy YM 80us) -> il TIMER handler
+	-- chiama lo stesso gate-tempo dell'IRQ2 = tick extra = musica accelera sotto SFX.
+	-- Neutralizzato l'IRQ come sull'arcade (dove non scatta mai); TMR_IRQ resta contato,
+	-- leggibile in status $1403 e salvato nel savestate (mappa SS invariata).
+	CPU_IRQT_N <= '1';   -- era: not TMR_IRQ or INT_MASK(2)
 	
 	RAM_SEL <= '1' when CPU_A(20 downto 15) = "111110" else '0'; -- RAM : Page $F8 - $FB
 	VDC_SEL <= '1' when CPU_A(20 downto 13) = x"FF" and CPU_A(12 downto 10) = "000" else '0'; -- VDC : $0000 - $03FF
@@ -195,13 +215,29 @@ begin
 			RD_N <= '1';
 			CPU_RDY <= '1';
 			VDC_SEL_OLD <= '0';
+			SS_WR_D <= '0';
 		elsif rising_edge(CLK) then
-			if CPU_CER = '1' then
+			SS_WR_D <= SS_WR;
+			if SS_WR_D = '1' then
+				-- Riallineo gli strobe di bus al ciclo-macchina RESTAURATO (WR_N/RD_N non sono
+				-- nel vettore SS: senza questo restano quelli stantii della run corrente ->
+				-- write RAM/OKI spuria o persa al resume). Un ck dopo SS_WR i combinatori
+				-- CPU_WE_N/CPU_MCYCLE riflettono MI/IR/STATE ripristinati. Fase: gli strobe
+				-- del ciclo vengono latchati su CPU_CER (CPU_CLK_CNT=2) -> se il punto salvato
+				-- e' oltre (>=2) li ricalcolo, altrimenti idle (li settera' il CER del resume).
+				if CPU_CLK_CNT >= 2 and CPU_MCYCLE = '1' then
+					WR_N <= CPU_WE_N;
+					RD_N <= not CPU_WE_N;
+				else
+					WR_N <= '1';
+					RD_N <= '1';
+				end if;
+			elsif CPU_CER = '1' then
 				if CPU_MCYCLE = '1' then
 					WR_N <= CPU_WE_N;
 					RD_N <= not CPU_WE_N;
-				end if; 
-				
+				end if;
+
 				VDC_SEL_OLD <= VDC_SEL or VCE_SEL;
 				if (VDC_SEL = '1' or VCE_SEL = '1') and VDC_SEL_OLD = '0' then
 					CPU_RDY <= '0';
@@ -210,9 +246,9 @@ begin
 				if CPU_RDY = '1' then
 					WR_N <= '1';
 					RD_N <= '1';
-				end if; 
+				end if;
 				CPU_RDY <= RDY;
-			end if; 
+			end if;
 		end if;
 	end process;
 	
@@ -400,9 +436,9 @@ begin
 		end if;
 	end process;
 
-	-- Savestate output: CPU core+AG (208) nei bit alti + stato top (38) nei bit bassi.
+	-- Savestate output: CPU core+AG+CS+SavedC+MI (252) nei bit alti + stato top (38) nei bit bassi.
 	-- Ordine top: INT_MASK|TMR_VALUE|TMR_LATCH|TMR_PRE_CNT|TMR_EN|TMR_RELOAD|TMR_IRQ|IO_BUF.
-	SS_DO <= std_logic_vector(CPU_CLK_CNT) & std_logic_vector(IO_CLK_CNT)  -- [253:246] fase divisori
+	SS_DO <= std_logic_vector(CPU_CLK_CNT) & std_logic_vector(IO_CLK_CNT)  -- [297:290] fase divisori
 	       & CPU_SS_DO
 	       & INT_MASK & TMR_VALUE & TMR_LATCH & std_logic_vector(TMR_PRE_CNT)
 	       & TMR_EN & TMR_RELOAD & TMR_IRQ & IO_BUF;

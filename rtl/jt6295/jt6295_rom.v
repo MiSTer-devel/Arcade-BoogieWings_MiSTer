@@ -41,7 +41,11 @@ module jt6295_rom(
     // ROM interface
     output reg [17:0] rom_addr,
     input      [ 7:0] rom_data,
-    input             rom_ok
+    input             rom_ok,
+    // Savestate (modello F2): al restore (pulse) azzera ctrl_ok/wait2 — sono flag REGISTRATI
+    // che sopravviverebbero 1 clk all'invalidazione della cache ROM esterna, e la FSM ctrl
+    // (clk pieno, no cen) farebbe UN advance spurio con rom_data stantio. auto_ss_wr=0 -> inerte.
+    input             auto_ss_wr
 );
 
 reg [7:0] st;
@@ -76,6 +80,13 @@ always @(posedge clk) begin
                 wait2 <= {wait2[0],1'b1};
         end
     endcase
+    // restore: ultimo statement = priorita'. ctrl_ok gia' latchato dal ciclo pre-restore
+    // viene azzerato; wait2=0 impone >=3 clk di addr stabile prima di ricredere a rom_ok
+    // (per allora la cache esterna e' invalidata -> rom_ok=0 -> FSM ferma fino al resume).
+    if( auto_ss_wr ) begin
+        ctrl_ok <= 1'b0;
+        wait2   <= 2'b0;
+    end
 end
 
 endmodule

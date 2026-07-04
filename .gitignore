@@ -1,7 +1,11 @@
-# Public release: si committa SOLO il SORGENTE (GPL, open). Gli artefatti di build/release
-# (output Quartus, .rbf, .zip, log, db) NON vanno nel repo.
+# Public release: si committa il SORGENTE (GPL, open) + la release (releases/ con RBF+MRA).
+# Gli artefatti di build Quartus (db, output_files, log) NON vanno nel repo.
+# NB: il .rbf di release sta in releases/ e VA committato -> *.rbf NON e' ignorato.
 
-# Quartus output / build artifacts
+# Local development (logs, sim, Quartus temp, reverse engineering)
+_dev/
+
+# Quartus output (se Quartus rigenera in root)
 output_files/
 db/
 incremental_db/
@@ -12,7 +16,6 @@ incremental_db/
 *.jdi
 *.pin
 *.sof
-*.rbf
 *.sld
 *.done
 *.qdf
@@ -20,17 +23,36 @@ incremental_db/
 c5_pin_model_dump.txt
 
 # Build logs
+*.log
 build_*.log
 fb_output.log
 
-# Release bundle (binari)
+# Editor / AI tools
+.claude/
+.vscode/
+.idea/
+transcript
+
+# Tcl scripts di analisi temporanei
+_sta_*.tcl
+_sta_*.txt
+sta_*.tcl
+sta_*.txt
+_top_paths.tcl
+report_paths.tcl
+
+# Sim temp
+sim/work/
+sim/transcript
+sim/vsim.wlf
+sim/modelsim.ini
+sim/*.log
+sim/*.hex
+sim/c[0-9]*
+
+# ROM binaries / bundle (mai committare)
 *.zip
+rom/
 
 # JTAG config locale
 jtag.cdf
-
-# ROM binaries (mai committare)
-sim/c[0-9]*
-sim/*.hex
-sim/work/
-sim/transcript

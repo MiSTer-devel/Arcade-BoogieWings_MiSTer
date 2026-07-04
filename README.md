@@ -12,23 +12,40 @@ alpha-blend mixer, DECO104 protection, and YM2151 + dual OKI M6295 audio.
 This core reimplements the hardware in SystemVerilog from MAME references
 and hardware observation.
 
-> **For now this repository holds only the GPL-covered material — the
-> SystemVerilog source code.** The bitstream (`.rbf`) and the `.mra` files
-> will be released once the author considers them complete. In the
-> meantime you can build the core yourself with Quartus (see *Building
-> from source*) and supply or create the MRA for your ROM set.
+## About the game
+
+**Boogie Wings** (*The Great Ragtime Show* in Japan) is a horizontally
+scrolling shoot-'em-up with a twist: you pilot a WWI-era biplane, but you
+can bail out at any moment and drop down to fight on foot, grabbing a
+grappling hook to swing across the stage, hijack enemy vehicles, and hurl
+objects at your foes. The mix of aerial and ground combat, the destructible
+scenery and the hand-drawn cartoon art make it one of Data East's most
+distinctive action games. The DE-0297 board pushes four scrolling
+playfields blended through the DECO ACE mixer, giving the game its layered,
+colourful look.
 
 ## Status
 
-**Current version: 0.9 (Beta)** (June 2026).
+**Current version: 1.0** (July 2026).
 
-The core runs the game end-to-end and has been tested on real MiSTer
-hardware. Expect rough edges while the core is in beta.
+The core runs the full game with audio, inputs and savestates, tested on
+real MiSTer hardware.
 
-**Work in progress for 1.0:**
-- Full savestate support (save/restore infrastructure is in, still being finalized)
-- Audio polish
-- OSD polish
+**Milestones reached**
+- Full playthrough with accurate video, audio and controls
+- The DE102 encrypted 68000 opcodes and the DECO56 tile scramble are
+  decrypted on board during ROM download — no pre-decrypted ROMs needed
+- DECO104 protection (I/O + data scramble) reproduced from MAME
+- MAME-accurate DECO16IC tilemaps (per-row / per-column scroll) and the
+  DECO ACE alpha-blend + fade mixer
+- Savestate (save / restore) ported from the Taito F2 core, including the
+  HuC6280 / YM2151 / OKI internal state
+- Native 57.8 Hz refresh with an optional 60 Hz mode
+
+**Roadmap**
+- Further audio and video accuracy polish
+- Additional savestate hardening across edge cases
+- More regional ROM sets as they are verified
 
 **Features**
 - 68000 main CPU (FX68K core) with DECO104 protection (I/O + scramble)
@@ -47,10 +64,22 @@ hardware. Expect rough edges while the core is in beta.
 - Savestate (save/restore) infrastructure ported from the Taito F2 core
 
 **ROM sets supported**
-- Boogie Wings (`boogwing`, World)
-- Boogie Wings (`boogwingu`, USA v1.7)
-- Boogie Wings (`boogwinga`, Asia v1.5)
-- The Great Ragtime Show (`ragtime`, Japan)
+- Boogie Wings (`boogwing`, Euro v1.5, 92.12.07) — parent
+- Boogie Wings (`boogwinga`, Asia v1.5, 92.12.07)
+- Boogie Wings (`boogwingu`, USA v1.7, 92.12.14)
+- The Great Ragtime Show (`ragtime`, Japan v1.5, 92.12.07)
+- The Great Ragtime Show (`ragtimea`, Japan v1.3, 92.11.26)
+
+## Screenshots
+
+| | |
+|---|---|
+| ![Title](docs/bw_Logo.png) | ![Data East](docs/bw_DE_Logo.png) |
+| Title screen | Data East |
+| ![Gameplay 1](docs/bw_Gameplay_1.png) | ![Gameplay 2](docs/bw_Gameplay_2.png) |
+| Gameplay | Gameplay |
+| ![Tutorial](docs/bw_tutorial_1.png) | ![High scores](docs/bw_Score.png) |
+| Tutorial | High scores |
 
 ## Hardware emulated
 
@@ -85,17 +114,24 @@ Output bitstream is generated in `output_files/BoogieWings.rbf`.
 
 ## Running on MiSTer
 
-This repository ships sources only — there is no prebuilt bitstream or MRA.
-To run the core you build it yourself and provide the MRA and ROMs:
+The [releases/](releases/) folder contains the parent MRA and a
+prebuilt RBF; regional clone MRAs are in
+[releases/alternatives/](releases/alternatives/):
 
-1. Build `BoogieWings.rbf` from source (see *Building from source* above).
-2. Copy the `.rbf` to `_Arcade/cores/` on the MiSTer SD card.
-3. Create or obtain an `.mra` for your ROM set and copy it to `_Arcade/`.
-4. Provide your legally-owned ROM files where the MRA expects them
-   (usually in `games/mame/`).
+- `Boogie Wings (Euro v1.5, 92.12.07).mra` — parent MRA
+- `BoogieWings_YYYYMMDD.rbf` — prebuilt bitstream
+- `alternatives/Boogie Wings (Asia v1.5, 92.12.07).mra` / `(USA v1.7, 92.12.14).mra` /
+  `The Great Ragtime Show (Japan v1.3 / v1.5).mra` — regional clones
 
-**Neither the bitstream, the MRA, nor the ROMs are included in this
-repository.** You must build/provide them yourself.
+Steps:
+
+1. Copy the `.rbf` to `_Arcade/cores/` on the MiSTer SD card (rename to
+   `BoogieWings.rbf` or keep the dated name and update the MRA accordingly).
+2. Copy the `.mra` file(s) to `_Arcade/` on the MiSTer SD card.
+3. Provide your legally-owned `boogwing.zip` (or regional variant) where
+   the MRA expects it (usually in `games/mame/`).
+
+**ROMs are NOT included in this repository.** You must provide them yourself.
 
 ## Repository layout
 
@@ -112,7 +148,9 @@ Arcade-BoogieWings_MiSTer/
 │   ├── pll/         Clock PLL
 │   └── sdram.sv     SDRAM controller (Sorgelig)
 ├── sys/             MiSTer framework (Sorgelig / MiSTer-devel)
-├── logo/            Pause overlay assets (logo, supporter scroll)
+├── logo/            Pause overlay assets (font, logo, supporter list)
+├── docs/            In-game screenshots
+├── releases/        Parent MRA + regional clones + prebuilt RBF
 ├── BoogieWings.qpf  Quartus project
 ├── BoogieWings.qsf  Quartus assignments
 ├── Template.sv      Top-level wrapper

@@ -83,13 +83,6 @@ source sys/sys_analog.tcl
 source files.qip
 # === COMMON utilities (used by BoogieWings) ===
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/ddram_4port.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/savestate.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/savestate_ram.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/savestate_ddr.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/memory_stream.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/ss_m68k.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/ss_ddr_gate.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/savestate_ui.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/sdram_bridge.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/rom_cache.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/tile_rom_arbiter.sv
@@ -104,8 +97,17 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/deco56_gfx_decrypt.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/deco56_ioctl_decrypt.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/de102_ioctl_decrypt.sv
 set_global_assignment -name SEARCH_PATH rtl/common
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/savestate.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/savestate_ram.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/savestate_ddr.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/memory_stream.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/ss_m68k.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/ss_ddr_gate.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/savestate_ui.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/mame_warning_overlay.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/pause_overlay.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/pause_text.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/pause_font.sv
 # === HUC6280 (sound CPU H6280) — TODO ===
 set_global_assignment -name QIP_FILE rtl/jt51/jt51.qip
 # === OKIM6295 (jt6295) — 2× istanze (oki0 + oki1) via DDR3 ===

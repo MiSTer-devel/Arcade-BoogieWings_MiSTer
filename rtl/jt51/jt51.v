@@ -43,12 +43,12 @@ module jt51(
     // Full resolution output
     output  signed  [15:0] xleft,
     output  signed  [15:0] xright,
-    // Savestate (auto_ss, modello F2). 2780 bit = mmr(1650)+eg(453)+pg(580)+timers(30)+
-    // noise(24)+lfo(43). mmr cresce di 6 (busy_cnt+busy) -> i blocchi sopra shiftano di +6.
-    // Layout: [1649:0]mmr [2102:1650]eg [2682:2103]pg [2712:2683]timers [2736:2713]noise
-    //  [2779:2737]lfo.
-    input      [2779:0] auto_ss_in,
-    output     [2779:0] auto_ss_out,
+    // Savestate (auto_ss, modello F2). 2820 bit = mmr(1690)+eg(453)+pg(580)+timers(30)+
+    // noise(24)+lfo(43). mmr cresce di 40 (write-staging) -> i blocchi sopra shiftano di +40.
+    // Layout: [1689:0]mmr [2142:1690]eg [2722:2143]pg [2752:2723]timers [2776:2753]noise
+    //  [2819:2777]lfo.
+    input      [2819:0] auto_ss_in,
+    output     [2819:0] auto_ss_out,
     input               auto_ss_wr
 );
 
@@ -79,8 +79,8 @@ jt51_timers u_timers(
     .flag_B     ( flag_B        ),
     .overflow_A ( overflow_A    ),
     .irq_n      ( irq_n         ),
-    .auto_ss_in ( auto_ss_in[2712:2683]  ),
-    .auto_ss_out( auto_ss_out[2712:2683] ),
+    .auto_ss_in ( auto_ss_in[2752:2723]  ),
+    .auto_ss_out( auto_ss_out[2752:2723] ),
     .auto_ss_wr ( auto_ss_wr             )
 );
 
@@ -148,8 +148,8 @@ jt51_lfo u_lfo(
 
     .am         ( am        ),
     .pm         ( pm        ),
-    .auto_ss_in ( auto_ss_in[2779:2737]  ),
-    .auto_ss_out( auto_ss_out[2779:2737] ),
+    .auto_ss_in ( auto_ss_in[2819:2777]  ),
+    .auto_ss_out( auto_ss_out[2819:2777] ),
     .auto_ss_wr ( auto_ss_wr             )
 );
 
@@ -177,8 +177,8 @@ jt51_pg u_pg(
     .pg_rst_III ( pg_rst_III    ),
     .keycode_III( keycode_III   ),
     .pg_phase_X ( ph_X          ),
-    .auto_ss_in ( auto_ss_in[2682:2103]  ),
-    .auto_ss_out( auto_ss_out[2682:2103] ),
+    .auto_ss_in ( auto_ss_in[2722:2143]  ),
+    .auto_ss_out( auto_ss_out[2722:2143] ),
     .auto_ss_wr ( auto_ss_wr             )
 );
 
@@ -212,8 +212,8 @@ jt51_eg u_eg(
     .ams_VII    ( ams_VII   ),
     .amsen_VII  ( amsen_VII ),
     .eg_XI      ( eg_XI ),
-    .auto_ss_in ( auto_ss_in[2102:1650]  ),
-    .auto_ss_out( auto_ss_out[2102:1650] ),
+    .auto_ss_in ( auto_ss_in[2142:1690]  ),
+    .auto_ss_out( auto_ss_out[2142:1690] ),
     .auto_ss_wr ( auto_ss_wr             )
 );
 
@@ -259,8 +259,8 @@ jt51_noise u_noise(
     .op31_no( op31_no   ),
     .out    ( noise     ),
     .mix    ( noise_mix ),
-    .auto_ss_in ( auto_ss_in[2736:2713]  ),
-    .auto_ss_out( auto_ss_out[2736:2713] ),
+    .auto_ss_in ( auto_ss_in[2776:2753]  ),
+    .auto_ss_out( auto_ss_out[2776:2753] ),
     .auto_ss_wr ( auto_ss_wr             )
 );
 
@@ -371,8 +371,8 @@ jt51_mmr u_mmr(
     .use_internal_y ( use_internal_y    ),
     .use_prev2      ( use_prev2         ),
     .use_prev1      ( use_prev1         ),
-    .auto_ss_in     ( auto_ss_in[1649:0]  ),
-    .auto_ss_out    ( auto_ss_out[1649:0] ),
+    .auto_ss_in     ( auto_ss_in[1689:0]  ),
+    .auto_ss_out    ( auto_ss_out[1689:0] ),
     .auto_ss_wr     ( auto_ss_wr          )
 );
 

@@ -19,7 +19,9 @@ module deco146_base #(
     parameter [1:0]  ADDR_SCRAMBLE = 2'd0,   // 0=none, 1=reversed, 2=interleave
     parameter        TABLE_OFFSET_HEX  = "deco146_offset.hex",
     parameter        TABLE_MAPPING_HEX = "deco146_mapping.hex",
-    parameter        TABLE_FLAGS_HEX   = "deco146_flags.hex"
+    parameter        TABLE_FLAGS_HEX   = "deco146_flags.hex",
+    parameter integer SS_RB0_IDX        = 0,
+    parameter integer SS_RB1_IDX        = 0
 )(
     input  wire        clk,
     input  wire        reset,
@@ -39,7 +41,18 @@ module deco146_base #(
     output reg   [7:0] soundlatch_data,
     output reg         soundlatch_irq,
     input  wire        soundlatch_rd,
-    output wire  [7:0] soundlatch_dout
+    output wire  [7:0] soundlatch_dout,
+
+    // Savestate auto_ss (69 bit): stato protezione DECO104. NON include soundlatch_irq (pulse
+    // transitorio 1 ciclo: salvarlo crea edge artificiale -> push spurio FIFO al restore).
+    //  [15:0] xor_reg  [31:16] nand_reg  [32] current_rambank  [43:33] latch_addr
+    //  [59:44] latch_data  [60] latch_flag  [68:61] soundlatch_data
+    input  wire [68:0] dc_ss_in,
+    output wire [68:0] dc_ss_out,
+    input  wire        dc_ss_wr,
+    // Savestate rambank0/1 (RAM 128x16 protezione) via ssbus
+    ssbus_if.slave     ss_rb0,
+    ssbus_if.slave     ss_rb1
 );
 
 // ============================================================
@@ -181,6 +194,8 @@ end
 always @(posedge clk) begin
     if (reset) begin
         current_rambank <= 1'b0;
+    end else if (dc_ss_wr) begin
+        current_rambank <= dc_ss_in[32];   // restore (trasparente)
     end else begin
         // s1_offset[15]=0 (= rambank) e [7:0] == BANK_SWAP_READ_ADDR
         if (cpu_cs && cpu_rd && !s1_latch_hit
@@ -201,8 +216,23 @@ always @(posedge clk) begin
         latch_addr <= 11'h7FF;
         latch_data <= 16'h0000;
         latch_flag <= 1'b0;
+    end else if (dc_ss_wr) begin
+        // Restore savestate (priorita', trasparente a SS spento): ricarica i reg protezione.
+        xor_reg         <= dc_ss_in[15:0];
+        nand_reg        <= dc_ss_in[31:16];
+        latch_addr      <= dc_ss_in[43:33];
+        latch_data      <= dc_ss_in[59:44];
+        latch_flag      <= dc_ss_in[60];
+        soundlatch_data <= dc_ss_in[68:61];
+        // soundlatch_irq NON ripristinato: pulse transitorio (1 ciclo). L'edge-detect del wrapper
+        // (sl_pulse_d) e' salvato in AUDIO_BUS -> nessun edge artificiale al restore.
     end else begin
         soundlatch_irq <= 1'b0;
+
+        // Write rambank0/1 da SS (restore) — nello STESSO always della write CPU per non creare
+        // doppio driver. Durante SS la CPU e' ferma (no cpu_wr), quindi niente conflitto reale.
+        if (rb0_ss_sel & ss_rb0.write) rambank0[ss_rb0.addr[6:0]] <= ss_rb0.data[15:0];
+        if (rb1_ss_sel & ss_rb1.write) rambank1[ss_rb1.addr[6:0]] <= ss_rb1.data[15:0];
 
         if (cpu_cs && cpu_wr) begin
             latch_addr <= addr_for_write;
@@ -237,5 +267,35 @@ always @(posedge clk) begin
 end
 
 assign soundlatch_dout = soundlatch_data;
+
+// ============================================================
+// Savestate: SAVE dei reg protezione (combinatorio, non tocca la logica).
+// ============================================================
+assign dc_ss_out = {soundlatch_data, latch_flag, latch_data,
+                    latch_addr, current_rambank, nand_reg, xor_reg};
+
+// ============================================================
+// Savestate rambank0/1 (RAM 128x16): porta SS dedicata in lettura/scrittura.
+// A SS spento (no access) la RAM e' scritta solo dalla CPU (logica originale, trasparente).
+// Durante SS: la porta SS dirotta addr/we/data e legge le word per save / scrive per restore.
+// ============================================================
+wire        rb0_ss_sel = ss_rb0.access(SS_RB0_IDX);
+wire        rb1_ss_sel = ss_rb1.access(SS_RB1_IDX);
+reg  [15:0] rb0_ss_rd, rb1_ss_rd;
+always @(posedge clk) rb0_ss_rd <= rambank0[ss_rb0.addr[6:0]];
+always @(posedge clk) rb1_ss_rd <= rambank1[ss_rb1.addr[6:0]];
+// NB: la WRITE SS di rambank0/1 e' nell'always "Write protport" (stesso always della write CPU)
+// per evitare doppio driver. Qui solo read/setup/ack/response.
+reg rb0_rd_d, rb1_rd_d;
+always @(posedge clk) begin
+    ss_rb0.setup(SS_RB0_IDX, 128, 1);   // 128 word, width 1 = 16 bit
+    ss_rb1.setup(SS_RB1_IDX, 128, 1);
+    rb0_rd_d <= rb0_ss_sel & ss_rb0.read;
+    rb1_rd_d <= rb1_ss_sel & ss_rb1.read;
+    if (rb0_ss_sel & ss_rb0.write) ss_rb0.write_ack(SS_RB0_IDX);
+    if (rb1_ss_sel & ss_rb1.write) ss_rb1.write_ack(SS_RB1_IDX);
+    if (rb0_rd_d) ss_rb0.read_response(SS_RB0_IDX, {48'b0, rb0_ss_rd});
+    if (rb1_rd_d) ss_rb1.read_response(SS_RB1_IDX, {48'b0, rb1_ss_rd});
+end
 
 endmodule

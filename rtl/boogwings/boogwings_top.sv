@@ -122,6 +122,18 @@ module boogwings_top
 	input  wire        ce_ym_p1,    // ~1.79 MHz, half rate per jt51
 	input  wire        ce_oki0,     // ~1.01 MHz, per OKI #0
 	input  wire        ce_oki1,     // ~2.00 MHz, per OKI #1
+	// Savestate fase contatori ce (da/verso Template): in = save, out + load_wr = restore.
+	input  wire [3:0]  ce_audio_cnt_in,
+	input  wire [4:0]  ce_ym_cnt_in,
+	input  wire        ce_ym_toggle_in,
+	input  wire [6:0]  ce_oki0_cnt_in,
+	input  wire [5:0]  ce_oki1_cnt_in,
+	output wire [3:0]  ce_audio_cnt_load,
+	output wire [4:0]  ce_ym_cnt_load,
+	output wire        ce_ym_toggle_load,
+	output wire [6:0]  ce_oki0_cnt_load,
+	output wire [5:0]  ce_oki1_cnt_load,
+	output wire        ce_cnt_load_wr,
 	// OSD audio sel (4 bit each) — Default/MAME hardcoded dentro boogwings_audio
 	input  wire [3:0]  osd_sel_fm,
 	input  wire [3:0]  osd_sel_oki0,
@@ -131,6 +143,7 @@ module boogwings_top
 	// Audio
 	output wire signed [15:0] audio_l,
 	output wire signed [15:0] audio_r,
+	output wire        paused_safe,    // gating frame-aligned per i contatori ce in Template.sv
 
 	// DDRAM HPS pins (per audio ROM, OKI samples, sprite ROM)
 	input  wire        DDRAM_CLK,
@@ -315,10 +328,23 @@ always @(posedge clk) begin
 		paused_safe_r <= 1'b0;
 	end else begin
 		vblank_pp_d <= vblank_in;
-		// Campiona pause UTENTE OR ss_pause a frame boundary (rising vblank). paused_safe_r e' la
-		// pausa REALE frame-aligned (= obj_paused di F2): si alza N cicli (<=1 frame) DOPO che
-		// ss_pause e' alto -> la FSM SS la aspetta (WAIT_PAUSE) per partire solo a sistema fermo.
-		if (vblank_in & ~vblank_pp_d) paused_safe_r <= pause | ss_pause;
+		// paused_safe_r = pausa REALE frame-aligned (= obj_paused di F2). UNA sola assegnazione, chiara:
+		//   - SALITA: solo al rising vblank, se (pause | ss_pause) -> il SAVE cattura a confine frame,
+		//     mai a meta' (video/audio puliti).
+		//   - MANTENIMENTO durante SS: se ss_pause e' alto e paused_safe_r e' gia' alto, RESTA alto
+		//     (non aspetta il prossimo vblank). FIX RACE: senza, se un confine vblank cade mentre
+		//     memory_stream scrive i chip audio (idx 20-25, ultimi), i ce_ym/ce_oki ripartirebbero a
+		//     META' scatter -> chip riceve registri mentre il contatore gira -> a volte muta a volte
+		//     glitcha (fase casuale = non deterministico, subito al restore). F2 usa obj_paused continuo.
+		//   - DISCESA: durante SS scende SUBITO quando ss_pause cade (restore finito) -> HuC+68k+chip
+		//     ripartono nello STESSO ciclo (come F2 obj_paused). Pausa utente: discesa al vblank.
+		// Trasparente a SS spento (ss_pause=0): si comporta come l'originale (salita/discesa al vblank).
+		if (ss_pause & paused_safe_r)
+			paused_safe_r <= 1'b1;                          // mantieni alto per tutta la durata del SS
+		else if (vblank_in & ~vblank_pp_d)
+			paused_safe_r <= pause | ss_pause;              // SALITA frame-aligned su pause|ss_pause (= F2);
+			                                               // DISCESA: a SS off ss_pause=0 -> torna a pause
+
 	end
 end
 // Pausa effettiva = SOLO il safe-pause REGISTRATO al vblank (paused_safe_r). Sia pausa utente
@@ -327,7 +353,9 @@ end
 // il savestate a META' FRAME (bypassando il vblank) -> VRAM/palette/sprite/audio catturati a
 // meta' transizione -> sfondi/palette corrotti, audio glitch. Ora TUTTO si ferma SOLO al vblank,
 // uguale alla pausa utente (che gia' freeza pulito). Come F2 obj_paused (frame-aligned).
-wire paused_safe = paused_safe_r;
+// paused_safe e' un output port (gata i contatori ce in Template.sv, gating dentro il contatore
+// come F2 .cen_in, non AND esterno sul pulse).
+assign paused_safe = paused_safe_r;
 
 // Pause: gating cen (NON reset). Durante il SS la CPU DEVE girare per eseguire il mini-handler
 // (ss_cpu_exec), quindi NON la fermiamo in quel caso anche se paused.
@@ -345,6 +373,7 @@ always @(posedge clk) begin
 	if (reset) irq6_pending <= 1'b0;
 	else if (vblank_in & ~vblank_d) irq6_pending <= 1'b1;  // rising edge VBLANK
 	else if (cpu_iack)              irq6_pending <= 1'b0;
+	else if (misc_ss_wr)            irq6_pending <= misc_irq6_load;   // restore (trasparente)
 end
 wire [2:0] cpu_irq_level = ss_irq        ? 3'd7 :
                            irq6_pending  ? 3'd6 : 3'd0;
@@ -504,7 +533,12 @@ localparam SS_IDX_OKI0        = 21;   // stato interno OKI #0 (jt6295, auto_ss 3
 localparam SS_IDX_OKI1        = 22;   // stato interno OKI #1 (jt6295, auto_ss 359 bit)
 localparam SS_IDX_YM          = 23;   // stato interno YM2151 (jt51, auto_ss 2774 bit)
 localparam SS_IDX_ACE         = 24;   // DECO ACE register file (blend/alpha/fade, 64x16)
-localparam SS_NSLAVES         = 25;
+localparam SS_IDX_AUDIO_BUS   = 25;   // stato persistente wrapper audio (FIFO sndlatch + YM/OKI ctrl, 161 bit)
+localparam SS_IDX_MISC        = 26;   // sprite DMA + palette DMA + priority_reg + irq6_pending (74 bit)
+localparam SS_IDX_DECO104     = 27;   // DECO104 reg protezione (xor/nand/bank/latch/soundlatch, 70 bit)
+localparam SS_IDX_DC_RB0      = 28;   // DECO104 rambank0 (RAM protezione 128x16)
+localparam SS_IDX_DC_RB1      = 29;   // DECO104 rambank1 (RAM protezione 128x16)
+localparam SS_NSLAVES         = 30;
 // memory_stream COUNT (>= SS_NSLAVES, potenza di 2). Con SS_NSLAVES>16 serve COUNT>=32.
 localparam SS_MS_COUNT        = 32;
 ssbus_if ssbus();
@@ -720,7 +754,14 @@ assign cpu_rdata = is_rom         ? rom_plain       :
 
 wire  [7:0] sndlatch_data;
 wire        sndlatch_irq_main_pulse;   // pulse main scrive nuovo latch
-deco104 u_prot (
+// Savestate DECO104: adaptor sui 70 bit di reg protezione (xor/nand/bank/latch/soundlatch).
+wire [68:0] dc_ss_out, dc_ss_in;
+wire        dc_ss_wr;
+auto_save_adaptor #(.N_BITS(69), .SS_IDX(SS_IDX_DECO104)) u_deco104_ss_adaptor (
+	.clk(clk), .ssbus(ssb[SS_IDX_DECO104]),
+	.bits_in(dc_ss_out), .bits_out(dc_ss_in), .bits_wr(dc_ss_wr)
+);
+deco104 #(.SS_RB0_IDX(SS_IDX_DC_RB0), .SS_RB1_IDX(SS_IDX_DC_RB1)) u_prot (
 	.clk             (clk),
 	.reset           (reset),
 	.cpu_addr        (cpu_addr[11:0]),  // offset relativo a $24E000
@@ -736,8 +777,45 @@ deco104 u_prot (
 	.soundlatch_data (sndlatch_data),
 	.soundlatch_irq  (sndlatch_irq_main_pulse),
 	.soundlatch_rd   (1'b0),             // H6280 non istanziata → mai legge
-	.soundlatch_dout ()
+	.soundlatch_dout (),
+	.dc_ss_in        (dc_ss_in),
+	.dc_ss_out       (dc_ss_out),
+	.dc_ss_wr        (dc_ss_wr),
+	.ss_rb0          (ssb[SS_IDX_DC_RB0]),
+	.ss_rb1          (ssb[SS_IDX_DC_RB1])
 );
+
+// =====================================================================
+// Savestate: sprite DMA FSM + palette DMA FSM + priority_reg + irq6_pending (74 bit)
+// =====================================================================
+localparam integer MISC_SS_BITS = 74;
+wire [MISC_SS_BITS-1:0] misc_ss_out, misc_ss_in;
+wire                   misc_ss_wr;
+auto_save_adaptor #(.N_BITS(MISC_SS_BITS), .SS_IDX(SS_IDX_MISC)) u_misc_ss_adaptor (
+	.clk     (clk),
+	.ssbus   (ssb[SS_IDX_MISC]),
+	.bits_in (misc_ss_out),
+	.bits_out(misc_ss_in),
+	.bits_wr (misc_ss_wr)
+);
+// SAVE: concatena in ordine (save = restore ordine identico)
+//  [73:58] priority_reg  [57] irq6_pending  [56:46] dma_rd_idx  [45:36] dma_wr_idx  [35] dma_which
+//  [34] dma2_active  [33] dma1_active  [32] pal_dma_active  [31:19] pal_dma_rd_idx  [18:8] pal_dma_wr_idx
+//  [7:0] pal_dma_b_lat
+assign misc_ss_out = {priority_reg, irq6_pending, dma_rd_idx, dma_wr_idx, dma_which, dma2_active, dma1_active,
+                      pal_dma_active, pal_dma_rd_idx, pal_dma_wr_idx, pal_dma_b_lat};
+// RESTORE: estrai con lo stesso ordine (endianness identica al save)
+wire [15:0] misc_priority_load        = misc_ss_in[73:58];
+wire        misc_irq6_load            = misc_ss_in[57];
+wire [10:0] misc_dma_rd_idx_load      = misc_ss_in[56:46];
+wire [9:0]  misc_dma_wr_idx_load      = misc_ss_in[45:36];
+wire        misc_dma_which_load       = misc_ss_in[35];
+wire        misc_dma2_load            = misc_ss_in[34];
+wire        misc_dma1_load            = misc_ss_in[33];
+wire        misc_pal_dma_active_load  = misc_ss_in[32];
+wire [12:0] misc_pal_dma_rd_idx_load  = misc_ss_in[31:19];
+wire [10:0] misc_pal_dma_wr_idx_load  = misc_ss_in[18:8];
+wire [7:0]  misc_pal_dma_b_lat_load   = misc_ss_in[7:0];
 
 // =====================================================================
 // Priority register (0x220000) — write da CPU, usato dal video mixer (TODO)
@@ -749,6 +827,7 @@ always @(posedge clk) begin
 		if (~cpu_dsn[0]) priority_reg[7:0]  <= cpu_wdata[7:0];
 		if (~cpu_dsn[1]) priority_reg[15:8] <= cpu_wdata[15:8];
 	end
+	else if (misc_ss_wr) priority_reg <= misc_priority_load;   // restore (trasparente a SS spento)
 end
 
 // === DEBUG: latch dei control regs di chip1 dal bus CPU (no touch al renderer) ===
@@ -1075,6 +1154,12 @@ always @(posedge clk) begin
 		dma_wr_idx  <= 10'd0;
 		dma_wr_en   <= 1'b0;
 		dma_which   <= 1'b0;
+	end else if (misc_ss_wr) begin   // restore DMA sprite FSM (trasparente a SS spento)
+		dma1_active <= misc_dma1_load;
+		dma2_active <= misc_dma2_load;
+		dma_rd_idx  <= misc_dma_rd_idx_load;
+		dma_wr_idx  <= misc_dma_wr_idx_load;
+		dma_which   <= misc_dma_which_load;
 	end else if (vblank_rise & ~paused_safe) begin
 		// MAME buffered_spriteram16: copy LIVE -> BUFFER a VBlank rise (bufsprite.h).
 		// Trigger qui (NON cpu_wr a 0x240000 che e' la prima word della live RAM).
@@ -1228,6 +1313,11 @@ always @(posedge clk) begin
 		pal_dma_wr_data  <= 24'd0;
 		pal_dma_rd_d0    <= 1'b0;
 		pal_dma_rd_valid_d <= 1'b0;
+	end else if (misc_ss_wr) begin   // restore palette DMA FSM (trasparente a SS spento)
+		pal_dma_active <= misc_pal_dma_active_load;
+		pal_dma_rd_idx <= misc_pal_dma_rd_idx_load;
+		pal_dma_wr_idx <= misc_pal_dma_wr_idx_load;
+		pal_dma_b_lat  <= misc_pal_dma_b_lat_load;
 	end else if ((is_paldma & cpu_wr) | ss_restore_done) begin
 		// Trigger DMA palette: comando gioco OPPURE restore appena finito (ricostruisce pal_buf
 		// da pal_cpu gia' ricaricato -> palette coerente senza salvare pal_buf nel SS).
@@ -2037,25 +2127,31 @@ wire        oki0_ddr_req_w, oki1_ddr_req_w;
 wire [31:0] oki0_ddr_data_w, oki1_ddr_data_w;     // 32-bit port (port 5/6 con prefetch)
 wire        oki0_ddr_ack_w, oki1_ddr_ack_w;
 
-// Audio cen gated da paused_safe (frame-aligned): in pausa i chip audio congelano lo
-// stato (gating cen, NON reset) -> ripresa pulita. Stesso frame boundary della CPU,
-// cosi' soundlatch/68K/HUC restano allineati (pattern Ninja Warriors / F2).
-wire ce_audio_g = ce_audio & ~paused_safe;
-wire ce_ym_g    = ce_ym    & ~paused_safe;
-wire ce_ym_p1_g = ce_ym_p1 & ~paused_safe;
-wire ce_oki0_g  = ce_oki0  & ~paused_safe;
-wire ce_oki1_g  = ce_oki1  & ~paused_safe;
+// Audio cen: gating frame-aligned DENTRO i contatori di Template.sv (i contatori congelano
+// quando paused_safe, NON taglio del pulse via AND esterno). Ripresa pulita al frame boundary,
+// come F2 .cen_in(~obj_paused). I ce_* arrivano gia' fermati durante pausa/SS.
 
 boogwings_audio #(.SS_HUC_RAM_IDX(SS_IDX_HUC_RAM), .SS_HUC_CPU_IDX(SS_IDX_HUC_CPU),
                   .SS_OKI0_IDX(SS_IDX_OKI0), .SS_OKI1_IDX(SS_IDX_OKI1),
-                  .SS_YM_IDX(SS_IDX_YM)) u_audio (
+                  .SS_YM_IDX(SS_IDX_YM), .SS_AUDIO_BUS_IDX(SS_IDX_AUDIO_BUS)) u_audio (
 	.clk            (clk),
 	.reset          (reset),
-	.ce_audio       (ce_audio_g),
-	.ce_ym          (ce_ym_g),
-	.ce_ym_p1       (ce_ym_p1_g),
-	.ce_oki0        (ce_oki0_g),
-	.ce_oki1        (ce_oki1_g),
+	.ce_audio       (ce_audio),
+	.ce_ym          (ce_ym),
+	.ce_ym_p1       (ce_ym_p1),
+	.ce_oki0        (ce_oki0),
+	.ce_oki1        (ce_oki1),
+	.ce_audio_cnt_in  (ce_audio_cnt_in),
+	.ce_ym_cnt_in     (ce_ym_cnt_in),
+	.ce_ym_toggle_in  (ce_ym_toggle_in),
+	.ce_oki0_cnt_in   (ce_oki0_cnt_in),
+	.ce_oki1_cnt_in   (ce_oki1_cnt_in),
+	.ce_audio_cnt_load (ce_audio_cnt_load),
+	.ce_ym_cnt_load    (ce_ym_cnt_load),
+	.ce_ym_toggle_load (ce_ym_toggle_load),
+	.ce_oki0_cnt_load  (ce_oki0_cnt_load),
+	.ce_oki1_cnt_load  (ce_oki1_cnt_load),
+	.ce_cnt_load_wr    (ce_cnt_load_wr),
 	.pause          (paused_safe),
 	.soundlatch_data     (sndlatch_data),
 	.soundlatch_irq_pulse(sndlatch_irq_main_pulse),
@@ -2082,7 +2178,8 @@ boogwings_audio #(.SS_HUC_RAM_IDX(SS_IDX_HUC_RAM), .SS_HUC_CPU_IDX(SS_IDX_HUC_CP
 	.ss_huc_cpu     (ssb[SS_IDX_HUC_CPU]),
 	.ss_oki0        (ssb[SS_IDX_OKI0]),
 	.ss_oki1        (ssb[SS_IDX_OKI1]),
-	.ss_ym          (ssb[SS_IDX_YM])
+	.ss_ym          (ssb[SS_IDX_YM]),
+	.ss_audio_bus   (ssb[SS_IDX_AUDIO_BUS])
 );
 
 // =====================================================================
@@ -2633,6 +2730,7 @@ ss_ddr_gate #(.AW(29), .DRAIN_TH(3)) u_ss_ddr_gate (
 	.ss_be          (ss_DDRAM_BE),
 	.ss_we          (ss_DDRAM_WE),
 	.DDRAM_BUSY     (DDRAM_BUSY),
+	.DDRAM_DOUT_READY(DDRAM_DOUT_READY),
 	// uscite mux'd verso il controller DDR3
 	.DDRAM_BURSTCNT (DDRAM_BURSTCNT),
 	.DDRAM_ADDR     (DDRAM_ADDR),

@@ -100,15 +100,20 @@ module jt51_mmr(
     output          use_internal_y,
     output          use_prev2,
     output          use_prev1,
-    // Savestate (auto_ss, modello F2). 1650 bit = busy(6) + jt51_reg (1589) + config mmr (55).
-    // I 6 bit busy in TESTA (mappe esistenti INVARIATE):
-    //  [1649:1645] busy_cnt(5)  [1644] busy   <- NUOVI (fase flag BUSY YM, back-pressure HuC)
+    // Savestate (auto_ss, modello F2). 1690 bit = staging(40) + busy(6) + jt51_reg (1589) + config mmr (55).
+    // I 40 bit di staging write IN TESTA (mappe esistenti INVARIATE, come fu fatto col busy):
+    //  [1689:1682] reg_sel(8)  [1681:1674] op_din(8)  [1673:1666] ch_din(8)
+    //  [1665:1664] up_op(2)  [1663:1661] up_ch(3)
+    //  [1660] up_rl [1659] up_kc [1658] up_kf [1657] up_pms [1656] up_dt1 [1655] up_tl
+    //  [1654] up_ks [1653] up_dt2 [1652] up_d1l [1651] up_keyon [1650] up_amsen
+    //   <- NUOVI: write-staging in volo (KON/operatore a meta' giro 32-cen), altrimenti note stuck/mute al restore.
+    //  [1649:1645] busy_cnt(5)  [1644] busy
     //  jt51_reg [1643:55] (invariato)
     //  Config [54:0]: ne[0] nfrq[5:1] lfo_freq[13:6] lfo_w[15:14] lfo_amd[22:16] lfo_pmd[29:23]
     //  value_A[39:30] value_B[47:40] load_A[48] load_B[49] enable_irq_A[50] enable_irq_B[51]
     //  csm[52] ct1[53] ct2[54].
-    input      [1649:0] auto_ss_in,
-    output     [1649:0] auto_ss_out,
+    input      [1689:0] auto_ss_in,
+    output     [1689:0] auto_ss_out,
     input               auto_ss_wr
 );
 
@@ -166,7 +171,7 @@ always @(posedge clk, posedge rst) begin : memory_mapped_registers
         `ifdef SIMULATION
         mmr_dump <= 1'b0;
         `endif
-    end else if( auto_ss_wr ) begin   // restore config
+    end else if( auto_ss_wr ) begin   // restore config + write-staging
         ne           <= auto_ss_in[0];
         nfrq         <= auto_ss_in[5:1];
         lfo_freq     <= auto_ss_in[13:6];
@@ -182,6 +187,23 @@ always @(posedge clk, posedge rst) begin : memory_mapped_registers
         csm          <= auto_ss_in[52];
         ct1          <= auto_ss_in[53];
         ct2          <= auto_ss_in[54];
+        // write-staging in volo
+        reg_sel      <= auto_ss_in[1689:1682];
+        op_din       <= auto_ss_in[1681:1674];
+        ch_din       <= auto_ss_in[1673:1666];
+        up_op        <= auto_ss_in[1665:1664];
+        up_ch        <= auto_ss_in[1663:1661];
+        up_rl        <= auto_ss_in[1660];
+        up_kc        <= auto_ss_in[1659];
+        up_kf        <= auto_ss_in[1658];
+        up_pms       <= auto_ss_in[1657];
+        up_dt1       <= auto_ss_in[1656];
+        up_tl        <= auto_ss_in[1655];
+        up_ks        <= auto_ss_in[1654];
+        up_dt2       <= auto_ss_in[1653];
+        up_d1l       <= auto_ss_in[1652];
+        up_keyon     <= auto_ss_in[1651];
+        up_amsen     <= auto_ss_in[1650];
     end else begin
         clr_flag_A <= 1'b0;
         clr_flag_B <= 1'b0;
@@ -302,6 +324,24 @@ end
 
 assign auto_ss_out[1649:1645] = busy_cnt;
 assign auto_ss_out[1644]      = busy;
+
+// Write-staging in volo (flag tenuti + dato): salvati o key-on/off persi a meta' giro -> note stuck/mute.
+assign auto_ss_out[1689:1682] = reg_sel;
+assign auto_ss_out[1681:1674] = op_din;
+assign auto_ss_out[1673:1666] = ch_din;
+assign auto_ss_out[1665:1664] = up_op;
+assign auto_ss_out[1663:1661] = up_ch;
+assign auto_ss_out[1660]      = up_rl;
+assign auto_ss_out[1659]      = up_kc;
+assign auto_ss_out[1658]      = up_kf;
+assign auto_ss_out[1657]      = up_pms;
+assign auto_ss_out[1656]      = up_dt1;
+assign auto_ss_out[1655]      = up_tl;
+assign auto_ss_out[1654]      = up_ks;
+assign auto_ss_out[1653]      = up_dt2;
+assign auto_ss_out[1652]      = up_d1l;
+assign auto_ss_out[1651]      = up_keyon;
+assign auto_ss_out[1650]      = up_amsen;
 
 jt51_reg u_reg(
     .rst        ( rst       ),

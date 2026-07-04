@@ -1,3 +1,8 @@
+-- HuC6280 (audio CPU) core.
+-- Original authors: Sergey Dvodnenko (srg320), Sorgelig, David Shadoff;
+-- original design by Gregory Estrade (FPGAPCE). From MiSTer TurboGrafx-16 / PC Engine.
+-- GPL-3.
+-- Modified for BoogieWings savestate (auto_ss instrumentation): Umberto Parisi (rmonc79)
 library IEEE;
 use IEEE.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -15,11 +20,15 @@ entity ALU is
 		CI		: in std_logic; 
 		VI		: in std_logic; 
 		NI		: in std_logic; 
-		CO		: out std_logic; 
-		VO		: out std_logic; 
-		NO		: out std_logic; 
-		ZO		: out std_logic; 
-		RES	: out std_logic_vector(7 downto 0)
+		CO		: out std_logic;
+		VO		: out std_logic;
+		NO		: out std_logic;
+		ZO		: out std_logic;
+		RES	: out std_logic_vector(7 downto 0);
+		-- Savestate: SavedC (carry BCD intermedio INC/DEC) — clocked su EN, va salvato/ripristinato.
+		SS_SAVEDC_O	: out std_logic;   -- valore corrente per il save
+		SS_SAVEDC_I	: in  std_logic;   -- valore da ripristinare
+		SS_WR		: in  std_logic    -- 1 (CPU ferma) -> load SavedC
 	);
 end ALU;
 
@@ -98,11 +107,15 @@ begin
 	process(CLK)
 	begin
 		if rising_edge(CLK) then
-			if EN = '1' then
+			if SS_WR = '1' then          -- restore (CPU ferma): ricarica il carry intermedio salvato
+				SavedC <= SS_SAVEDC_I;
+			elsif EN = '1' then
 				SavedC <= AddCO;
 			end if;
 		end if;
 	end process;
+
+	SS_SAVEDC_O <= SavedC;
 	
 	process(CTRL, CR, IntL, IntR, AddCO, AddS)
 	begin

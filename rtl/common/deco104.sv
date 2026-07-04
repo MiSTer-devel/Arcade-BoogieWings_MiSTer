@@ -18,7 +18,10 @@
 // (1024 entry, estratte da reference/mame/deco104.cpp via extract_deco104_table.py).
 //
 
-module deco104
+module deco104 #(
+    parameter integer SS_RB0_IDX = 0,
+    parameter integer SS_RB1_IDX = 0
+)
 (
     input  wire        clk,
     input  wire        reset,
@@ -41,7 +44,14 @@ module deco104
     output wire  [7:0] soundlatch_data,
     output wire        soundlatch_irq,
     input  wire        soundlatch_rd,
-    output wire  [7:0] soundlatch_dout
+    output wire  [7:0] soundlatch_dout,
+
+    // Savestate: reg protezione (69 bit, no soundlatch_irq) + rambank0/1 via ssbus
+    input  wire [68:0] dc_ss_in,
+    output wire [68:0] dc_ss_out,
+    input  wire        dc_ss_wr,
+    ssbus_if.slave     ss_rb0,
+    ssbus_if.slave     ss_rb1
 );
 
 wire [7:0] sl_data;
@@ -57,7 +67,9 @@ deco146_base #(
     .ADDR_SCRAMBLE        (2'd1),         // Boogie Wings = reversed
     .TABLE_OFFSET_HEX     ("deco104_offset.hex"),
     .TABLE_MAPPING_HEX    ("deco104_mapping.hex"),
-    .TABLE_FLAGS_HEX      ("deco104_flags.hex")
+    .TABLE_FLAGS_HEX      ("deco104_flags.hex"),
+    .SS_RB0_IDX           (SS_RB0_IDX),
+    .SS_RB1_IDX           (SS_RB1_IDX)
 ) u_base (
     .clk             (clk),
     .reset           (reset),
@@ -74,7 +86,12 @@ deco146_base #(
     .soundlatch_data (sl_data),
     .soundlatch_irq  (sl_irq),
     .soundlatch_rd   (soundlatch_rd),
-    .soundlatch_dout (soundlatch_dout)
+    .soundlatch_dout (soundlatch_dout),
+    .dc_ss_in        (dc_ss_in),
+    .dc_ss_out       (dc_ss_out),
+    .dc_ss_wr        (dc_ss_wr),
+    .ss_rb0          (ss_rb0),
+    .ss_rb1          (ss_rb1)
 );
 
 assign soundlatch_data = sl_data;

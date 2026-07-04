@@ -1,6 +1,8 @@
-// Darius (Taito 1987) — MiSTer core
-// Dual FX68K + Genesis SDRAM controller (3 ports)
-// Based on MiSTer Template by Sorgelig
+/*  This file is part of BoogieWings_MiSTer.
+    GPL-3.
+    Based on the MiSTer Template by Sorgelig.
+    BoogieWings core: Umberto Parisi (rmonc79).
+*/
 
 module emu
 (
@@ -147,6 +149,14 @@ assign HDMI_BOB_DEINT = 0;
 
 assign AUDIO_S = 1;  // signed audio
 wire signed [15:0] game_audio_l, game_audio_r;
+wire paused_safe;   // da boogwings_top: gata i contatori ce audio (gating frame-aligned)
+// Savestate: valori di restore dei contatori ce (da boogwings_top) + pulse di load.
+wire [3:0] ce_audio_cnt_load;
+wire [4:0] ce_ym_cnt_load;
+wire       ce_ym_toggle_load;
+wire [6:0] ce_oki0_cnt_load;
+wire [5:0] ce_oki1_cnt_load;
+wire       ce_cnt_load_wr;
 assign AUDIO_L = game_audio_l;
 assign AUDIO_R = game_audio_r;
 assign AUDIO_MIX = 0;
@@ -202,7 +212,7 @@ wire layer_spr_en = ~status[32];
 wire layer_fg0_en = ~status[33];
 wire layer_fg1_en = ~status[34];
 
-// Refresh rate selector (OSD status[22]): 0=nativo 56.6Hz (V_TOTAL=274),
+// Refresh rate selector (OSD status[22]): 0=nativo 57.8Hz (V_TOTAL=269),
 // 1=60Hz (V_TOTAL=258) — accorcia il blanking verticale, ce_pix /14 invariato.
 wire mode_60hz = status[22];
 
@@ -290,7 +300,7 @@ localparam CONF_STR = {
 	"P1,Video;",
 	"P1O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"P1O[21:19],Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer,HV-Integer;",
-	"P1O[22],Refresh Rate,Original 56.6Hz,60Hz;",
+	"P1O[22],Refresh Rate,Original 57.8Hz,60Hz;",
 	"P1O[91:86],Analog VGA H-Shift,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63;",
 	"P1O[25:23],Analog VGA V-Shift,0,1,2,3,4,5,6,7;",
 	"-;",
@@ -302,6 +312,7 @@ localparam CONF_STR = {
 	"O[33],Layer FG0,On,Off;",
 	"O[34],Layer FG1,On,Off;",
 	"-;",
+	/* Layer Offsets: menu debug tuning offset layer — nascosto dall'OSD (bit status restano validi).
 	"P2,Layer Offsets;",
 	"P2O[43:38],BG0 X offset,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,+16,+17,+18,+19,+20,+21,+22,+23,+24,+25,+26,+27,+28,+29,+30,+31,-32,-31,-30,-29,-28,-27,-26,-25,-24,-23,-22,-21,-20,-19,-18,-17,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
 	"P2O[49:44],BG0 Y offset,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,+16,+17,+18,+19,+20,+21,+22,+23,+24,+25,+26,+27,+28,+29,+30,+31,-32,-31,-30,-29,-28,-27,-26,-25,-24,-23,-22,-21,-20,-19,-18,-17,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
@@ -310,6 +321,7 @@ localparam CONF_STR = {
 	"P2O[79:74],FG X offset,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,+16,+17,+18,+19,+20,+21,+22,+23,+24,+25,+26,+27,+28,+29,+30,+31,-32,-31,-30,-29,-28,-27,-26,-25,-24,-23,-22,-21,-20,-19,-18,-17,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
 	"P2O[85:80],FG Y offset,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15,+16,+17,+18,+19,+20,+21,+22,+23,+24,+25,+26,+27,+28,+29,+30,+31,-32,-31,-30,-29,-28,-27,-26,-25,-24,-23,-22,-21,-20,-19,-18,-17,-16,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1;",
 	"-;",
+	*/
 	"P3,Audio Mixer;",
 	"P3O[10:7],FM (YM2151) gain,Default,Mute,MAME,25%,50%,75%,100%,125%,150%,200%,250%,300%,400%,500%,700%,1000%;",
 	"P3O[14:11],OKI0 (voci/SFX) gain,Default,Mute,MAME,25%,50%,75%,100%,125%,150%,200%,250%,300%,400%,500%,700%,1000%;",
@@ -843,11 +855,15 @@ always @(posedge clk_sys) begin
 		ce_audio_r   <= 1'b0;
 	end else begin
 		ce_audio_r <= 1'b0;
-		if (ce_audio_cnt == 4'd11) begin
-			ce_audio_cnt <= 4'd0;
-			ce_audio_r   <= 1'b1;
-		end else begin
-			ce_audio_cnt <= ce_audio_cnt + 4'd1;
+		if (ce_cnt_load_wr) begin
+			ce_audio_cnt <= ce_audio_cnt_load;   // restore fase (trasparente: a SS spento load_wr=0)
+		end else if (~paused_safe) begin
+			if (ce_audio_cnt == 4'd11) begin
+				ce_audio_cnt <= 4'd0;
+				ce_audio_r   <= 1'b1;
+			end else begin
+				ce_audio_cnt <= ce_audio_cnt + 4'd1;
+			end
 		end
 	end
 end
@@ -867,13 +883,18 @@ always @(posedge clk_sys) begin
 	end else begin
 		ce_ym_r    <= 1'b0;
 		ce_ym_p1_r <= 1'b0;
-		if (ce_ym_cnt == 5'd26) begin
-			ce_ym_cnt    <= 5'd0;
-			ce_ym_r      <= 1'b1;
-			ce_ym_p1_r   <= ce_ym_toggle;     // pulse 1/2 della volta di ce_ym
-			ce_ym_toggle <= ~ce_ym_toggle;
-		end else begin
-			ce_ym_cnt <= ce_ym_cnt + 5'd1;
+		if (ce_cnt_load_wr) begin
+			ce_ym_cnt    <= ce_ym_cnt_load;       // restore fase + toggle (half-rate jt51 cen_p1)
+			ce_ym_toggle <= ce_ym_toggle_load;
+		end else if (~paused_safe) begin
+			if (ce_ym_cnt == 5'd26) begin
+				ce_ym_cnt    <= 5'd0;
+				ce_ym_r      <= 1'b1;
+				ce_ym_p1_r   <= ce_ym_toggle;     // pulse 1/2 della volta di ce_ym
+				ce_ym_toggle <= ~ce_ym_toggle;
+			end else begin
+				ce_ym_cnt <= ce_ym_cnt + 5'd1;
+			end
 		end
 	end
 end
@@ -889,11 +910,15 @@ always @(posedge clk_sys) begin
 		ce_oki0_r   <= 1'b0;
 	end else begin
 		ce_oki0_r <= 1'b0;
-		if (ce_oki0_cnt == 7'd94) begin
-			ce_oki0_cnt <= 7'd0;
-			ce_oki0_r   <= 1'b1;
-		end else begin
-			ce_oki0_cnt <= ce_oki0_cnt + 7'd1;
+		if (ce_cnt_load_wr) begin
+			ce_oki0_cnt <= ce_oki0_cnt_load;     // restore fase
+		end else if (~paused_safe) begin
+			if (ce_oki0_cnt == 7'd94) begin
+				ce_oki0_cnt <= 7'd0;
+				ce_oki0_r   <= 1'b1;
+			end else begin
+				ce_oki0_cnt <= ce_oki0_cnt + 7'd1;
+			end
 		end
 	end
 end
@@ -908,11 +933,15 @@ always @(posedge clk_sys) begin
 		ce_oki1_r   <= 1'b0;
 	end else begin
 		ce_oki1_r <= 1'b0;
-		if (ce_oki1_cnt == 6'd47) begin
-			ce_oki1_cnt <= 6'd0;
-			ce_oki1_r   <= 1'b1;
-		end else begin
-			ce_oki1_cnt <= ce_oki1_cnt + 6'd1;
+		if (ce_cnt_load_wr) begin
+			ce_oki1_cnt <= ce_oki1_cnt_load;     // restore fase
+		end else if (~paused_safe) begin
+			if (ce_oki1_cnt == 6'd47) begin
+				ce_oki1_cnt <= 6'd0;
+				ce_oki1_r   <= 1'b1;
+			end else begin
+				ce_oki1_cnt <= ce_oki1_cnt + 6'd1;
+			end
 		end
 	end
 end
@@ -1049,6 +1078,18 @@ boogwings_top game
 	.ce_ym_p1(ce_ym_p1),
 	.ce_oki0(ce_oki0),
 	.ce_oki1(ce_oki1),
+	// Savestate fase contatori ce: passa i valori (save) + ricevi i load (restore)
+	.ce_audio_cnt_in(ce_audio_cnt),
+	.ce_ym_cnt_in(ce_ym_cnt),
+	.ce_ym_toggle_in(ce_ym_toggle),
+	.ce_oki0_cnt_in(ce_oki0_cnt),
+	.ce_oki1_cnt_in(ce_oki1_cnt),
+	.ce_audio_cnt_load(ce_audio_cnt_load),
+	.ce_ym_cnt_load(ce_ym_cnt_load),
+	.ce_ym_toggle_load(ce_ym_toggle_load),
+	.ce_oki0_cnt_load(ce_oki0_cnt_load),
+	.ce_oki1_cnt_load(ce_oki1_cnt_load),
+	.ce_cnt_load_wr(ce_cnt_load_wr),
 	.osd_sel_fm  (osd_sel_fm),
 	.osd_sel_oki0(osd_sel_oki0),
 	.osd_sel_oki1(osd_sel_oki1),
@@ -1105,6 +1146,7 @@ boogwings_top game
 	// Audio
 	.audio_l(game_audio_l),
 	.audio_r(game_audio_r),
+	.paused_safe(paused_safe),
 
 	// DDRAM HPS pins
 	.DDRAM_CLK(clk_sys),
@@ -1223,13 +1265,14 @@ wire [7:0] vdbg_r = mame_r;
 wire [7:0] vdbg_g = mame_g;
 wire [7:0] vdbg_b = mame_b;
 
-// Pause overlay: dim + logo 48x48 al centro durante pausa.
-// Clean Pause (status[35]) gate: se ON, l'overlay vede pause=0 → passthrough video
-// raw senza dim/logo. La CPU resta comunque freeze tramite `pause`.
-wire pause_ovl_en = pause & ~clean_pause;
+// Pause overlay: dim + logo + testo supporter durante pausa.
+// Clean Pause (status[35]): se ON, overlay bypass (passthrough raw). Il modulo
+// gata internamente overlay_on = pause & ~clean.
 pause_overlay u_pause_ovl (
 	.clk       (clk_sys),
-	.pause     (pause_ovl_en),
+	.pause     (paused_safe),
+	.clean     (clean_pause),
+	.vblank    (VBlank),
 	.render_x  (render_x),
 	.render_y  (render_y),
 	.rgb_r_in  (vdbg_r),

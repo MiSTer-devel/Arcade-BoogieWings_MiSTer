@@ -1,3 +1,8 @@
+-- HuC6280 (audio CPU) core.
+-- Original authors: Sergey Dvodnenko (srg320), Sorgelig, David Shadoff;
+-- original design by Gregory Estrade (FPGAPCE). From MiSTer TurboGrafx-16 / PC Engine.
+-- GPL-3.
+-- Modified for BoogieWings savestate (auto_ss instrumentation): Umberto Parisi (rmonc79)
 library IEEE;
 use IEEE.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -11,7 +16,13 @@ entity HUC6280_MC is
 		  EN		: in std_logic;
         IR		: in std_logic_vector(7 downto 0);
         STATE	: in unsigned(4 downto 0);
-        M		: out MCode_r
+        M		: out MCode_r;
+        -- Savestate (auto_ss, pattern F2): MI (registro microistruzione) e' in lockstep con
+        -- IR/STATE registrati; senza restore il primo ciclo EN post-load eseguirebbe lo stato
+        -- ripristinato con la microistruzione stantia -> derail CPU. SS_WR=0 -> trasparente.
+        SS_DI	: in  std_logic_vector(41 downto 0);
+        SS_DO	: out std_logic_vector(41 downto 0);
+        SS_WR	: in  std_logic
     );
 end HUC6280_MC;
 
@@ -6976,7 +6987,14 @@ begin
 		if RST_N = '0' then
 			MI <= ("00","000","00","000","000","000000","001","000","000","0000","00000","0000",'1');
 		elsif rising_edge(CLK) then
-			if EN = '1' then
+			if SS_WR = '1' then
+				-- restore (CPU ferma): ricarica la microistruzione salvata, in lockstep con IR/STATE
+				MI <= (SS_DI(41 downto 40), SS_DI(39 downto 37), SS_DI(36 downto 35),
+				       SS_DI(34 downto 32), SS_DI(31 downto 29), SS_DI(28 downto 23),
+				       SS_DI(22 downto 20), SS_DI(19 downto 17), SS_DI(16 downto 14),
+				       SS_DI(13 downto 10), SS_DI(9 downto 5),   SS_DI(4 downto 1),
+				       SS_DI(0));
+			elsif EN = '1' then
 				N := unsigned(IR)&STATE(2 downto 0);
 				if STATE = "00000" then
 					MI <= ("00","000","00","000","000","000000","001","000","000","0000","00000","0000",'1');
@@ -6990,6 +7008,11 @@ begin
 			end if;
 		end if;
 	end process;
+
+	-- Savestate: MI impacchettato nell'ordine del record (42 bit)
+	SS_DO <= MI.STATE_CTRL & MI.ADDR_BUS & MI.LOAD_SDLH & MI.LOAD_P & MI.LOAD_T &
+	         MI.ADDR_CTRL & MI.LOAD_PC & MI.LOAD_SP & MI.AXY_CTRL & MI.ALUBUS_CTRL &
+	         MI.ALUCtrl & MI.OUT_BUS & MI.MEM_CYCLE;
 
 	M <= (MI.STATE_CTRL,
 			MI.ADDR_BUS,

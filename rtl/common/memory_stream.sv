@@ -217,15 +217,33 @@ module memory_stream #(parameter COUNT = 16)
 
                 QUERY_SCATTER_WAIT: begin
                     if (chunk_data_ack) begin
-                        // TODO check size and width
                         query_req <= 0;
                         write_req <= 0;
                         state <= READ_MEM_REQ;
-                        next_chunk_address <= 0;
+                        if ((chunk_read_data[31:0] != chunk_remaining) || (chunk_read_data[33:32] != chunk_width)) begin
+                            // Size/width del chunk nel FILE != slave attuale (save fatto con una
+                            // build diversa): SKIP pulito — avanza oltre i dati senza scatter.
+                            // Applicare parole disallineate corrompe lo stato (es. HUC 254->256:
+                            // stesso word count ma bit shiftati).
+                            // SKIP FASE-ESATTO: il layout su file dipende dalla fase-parola
+                            // (word_counter) che si PROPAGA tra i chunk (mai azzerata tra chunk):
+                            // linee dati = ceil((wc+count)*bytes_word/8), fase in uscita =
+                            // (wc+count) mod parole_per_linea. Senza aggiornare word_counter
+                            // tutti i chunk successivi verrebbero applicati sfasati di wc parole.
+                            current_addr <= current_addr + (((({29'd0, word_counter} + chunk_remaining) << chunk_width) + 32'd7) & 32'hFFFFFFF8);
+                            word_counter <= (word_counter + chunk_remaining[2:0]) & word_end[chunk_width];
+                            chunk_remaining <= 0;
+                        end else begin
+                            next_chunk_address <= 0;
+                        end
                     end else if (&query_delay) begin
                         write_req <= 0;
                         query_req <= 0;
-                        current_addr <= current_addr + ((chunk_remaining + 32'd7) & 32'hFFFFFFF8);
+                        // Skip su timeout (slave assente): stessa formula fase-esatta. (Prima
+                        // avanzava di chunk_remaining BYTE senza fase -> header successivo letto
+                        // a meta' chunk = tutti i chunk seguenti disallineati.)
+                        current_addr <= current_addr + (((({29'd0, word_counter} + chunk_remaining) << chunk_width) + 32'd7) & 32'hFFFFFFF8);
+                        word_counter <= (word_counter + chunk_remaining[2:0]) & word_end[chunk_width];
                         chunk_remaining <= 0;
                         state <= READ_MEM_REQ;
                     end else begin

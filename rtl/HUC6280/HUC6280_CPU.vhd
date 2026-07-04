@@ -31,9 +31,9 @@ entity HUC6280_CPU is
 		CS  		: out std_logic;
 
 		-- Savestate (auto_ss, pattern F2): SS_WR=0 -> trasparente; SS_WR=1 (CPU ferma) -> load.
-		-- 208 bit = stato CPU core (175) + stato AG propagato (33).
-		SS_DO		: out std_logic_vector(207 downto 0);
-		SS_DI		: in  std_logic_vector(207 downto 0);
+		-- 210 bit = stato CPU core (175) + AG propagato (33) + CS (1, speed-mode) + SavedC (1, carry ALU).
+		SS_DO		: out std_logic_vector(251 downto 0);
+		SS_DI		: in  std_logic_vector(251 downto 0);
 		SS_WR		: in  std_logic
 	);
 end HUC6280_CPU;
@@ -75,6 +75,7 @@ architecture rtl of HUC6280_CPU is
 
 	--ALU
 	signal ALU_CTRL 		: ALUCtrl_r;
+	signal ALU_SAVEDC		: std_logic;   -- SavedC dell'ALU, per il savestate
 	signal ALU_L 			: std_logic_vector(7 downto 0);
 	signal ALU_OUT 		: std_logic_vector(7 downto 0);
 	signal CO 				: std_logic;
@@ -101,9 +102,14 @@ architecture rtl of HUC6280_CPU is
 	-- gli alias SSI_* qui rendono il restore leggibile e garantiscono che i due lati combacino.
 	signal AG_SS_DO	: std_logic_vector(32 downto 0);  -- stato AG (PCr|AAL|AAH|SavedCarry)
 	signal AG_SS_WR	: std_logic;
-	-- ===== Mappa bit del vettore savestate (208 bit), dall'alto verso il basso =====
+	signal MC_SS_DO	: std_logic_vector(41 downto 0);  -- microistruzione MI (dentro il MC)
+	signal CS_int	: std_logic;  -- copia interna di CS (il port out non si puo' leggere nel concat SS_DO)
+	-- ===== Mappa bit del vettore savestate (252 bit), dall'alto verso il basso =====
 	-- L'ordine e' definito UNA volta qui dagli alias; SS_DO (in fondo) concatena nello STESSO
 	-- ordine e il restore usa questi alias -> i due lati combaciano per costruzione.
+	--   [251:210] MI (42: microistruzione registrata nel MC, in lockstep con IR/STATE)
+	--   [209] SavedC (carry BCD intermedio INC/DEC, interno all'ALU)
+	--   [208] CS (speed-mode CSL/CSH: periodo divisore /24 vs /6)
 	--   [207:175] AG (33: PCr|AAL|AAH|SavedCarry, dentro l'AG)
 	--   [174:167] A   [166:159] X   [158:151] Y   [150:143] SP  [142:135] P
 	--   [134:127] T   [126:119] DR  [118:111] SH  [110:103] DH  [102:95]  LH
@@ -124,6 +130,10 @@ architecture rtl of HUC6280_CPU is
 	alias  SSI_MPRL  : std_logic_vector(7 downto 0) is SS_DI(30 downto 23);
 	alias  SSI_IR    : std_logic_vector(7 downto 0) is SS_DI(22 downto 15);
 	alias  SSI_STATE : std_logic_vector(4 downto 0) is SS_DI(14 downto 10);
+	alias  SSI_CS    : std_logic                    is SS_DI(208);
+	alias  SSI_SAVEDC: std_logic                    is SS_DI(209);
+	alias  SSI_AG    : std_logic_vector(32 downto 0) is SS_DI(207 downto 175);
+	alias  SSI_MI    : std_logic_vector(41 downto 0) is SS_DI(251 downto 210);
 
 begin
 
@@ -239,7 +249,10 @@ begin
 		EN			=> EN,
 		IR			=> NEXT_IR,
 		STATE		=> NEXT_STATE,
-		M			=> MC
+		M			=> MC,
+		SS_DI		=> SSI_MI,
+		SS_DO		=> MC_SS_DO,
+		SS_WR		=> SS_WR
 	);
 	
 	process(MC, IR, STATE, TALT)
@@ -295,7 +308,10 @@ begin
 		VO    	=> VO,
 		NO   		=> NO,
 		ZO   		=> ZO,
-		RES		=> ALU_OUT
+		RES		=> ALU_OUT,
+		SS_SAVEDC_O	=> ALU_SAVEDC,
+		SS_SAVEDC_I	=> SSI_SAVEDC,
+		SS_WR		=> SS_WR
 	);
 
 				  
@@ -515,7 +531,7 @@ begin
 		PC     		=> PC,
 		AA     		=> AA,
 		SS_DO			=> AG_SS_DO,
-		SS_DI			=> SS_DI(201 downto 169),   -- SSI_AG
+		SS_DI			=> SSI_AG,   -- AG (PCr|AAL|AAH|SavedCarry) in [207:175], allineato al SAVE
 		SS_WR			=> AG_SS_WR
 	);
 	
@@ -629,21 +645,28 @@ begin
 	process(CLK, RST_N)
 	begin
 		if RST_N = '0' then
-			CS <= '0';
+			CS_int <= '0';
 		elsif rising_edge(CLK) then
-			if EN = '1' then
+			if SS_WR = '1' then          -- restore (CPU ferma): ricarica lo speed-mode salvato
+				CS_int <= SSI_CS;
+			elsif EN = '1' then
 				if IR(6 downto 0) = "1010100" and STATE = "00001" then
-					CS <= IR(7);
-				end if; 
-			end if; 
+					CS_int <= IR(7);
+				end if;
+			end if;
 		end if;
 	end process;
-	
+
+	CS <= CS_int;   -- port out pilotato dalla copia interna leggibile
+
 	MCYCLE <= MC.MEM_CYCLE;
 
-	-- Savestate output: concatenazione nello STESSO ordine della mappa alias (208 bit).
-	--   [207:175]=AG  [174:167]=A ... [0]=NMI_ACTIVE. Vedi commento mappa nelle dichiarazioni.
-	SS_DO <= AG_SS_DO
+	-- Savestate output: concatenazione nello STESSO ordine della mappa alias (252 bit).
+	--   [251:210]=MI [209]=SavedC [208]=CS [207:175]=AG [174:167]=A ... [0]=NMI_ACTIVE. Vedi mappa nelle dichiarazioni.
+	SS_DO <= MC_SS_DO
+	       & ALU_SAVEDC
+	       & CS_int
+	       & AG_SS_DO
 	       & A & X & Y & SP & P
 	       & T & DR & SH & DH & LH
 	       & MPR(0) & MPR(1) & MPR(2) & MPR(3) & MPR(4) & MPR(5) & MPR(6) & MPR(7)

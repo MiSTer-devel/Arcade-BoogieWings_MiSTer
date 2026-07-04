@@ -58,6 +58,7 @@ module ss_ddr_gate #(
 
 	// Stato fisico del bus DDR (per il drenaggio e il rilascio pulito)
 	input  wire           DDRAM_BUSY,
+	input  wire           DDRAM_DOUT_READY,  // beat di lettura dal controller (conteggio burst in volo)
 
 	// Uscite verso il controller DDR3 (mux'd)
 	output wire [7:0]     DDRAM_BURSTCNT,
@@ -72,9 +73,29 @@ module ss_ddr_gate #(
 	output reg            ss_ddr_grant    // 1: il MUX devia DDRAM_* al SS
 );
 
-// "bus quiet" = NESSUNA transazione DDR fisica in volo. Letto post-MUX: con grant=0
-// DDRAM_RD/WE valgono game_* (l'arbitro) -> riflette le transazioni del gioco da drenare.
-wire ss_bus_quiet = ~DDRAM_RD & ~DDRAM_WE & ~DDRAM_BUSY;
+// DRAIN-HOLE FIX: una read DDR e' uno STROBE di 1 clk, ma i beat di risposta arrivano
+// dopo la latenza del controller (decine di clk) con RD=WE=0 e BUSY spesso 0 -> il
+// vecchio quiet (~RD&~WE&~BUSY) contava "fermo" CON un burst in volo: il grant saliva
+// a meta' transazione e memory_stream catturava i beat del GIOCO come header/dati dello
+// stream (restore corrotto). Conto i beat attesi: +burstcnt su read accettata (pre-grant
+// = read del gioco), -1 su ogni DDRAM_DOUT_READY finche' pending>0. Quiet solo a zero.
+reg [8:0] game_beats_pending = 9'd0;
+always @(posedge clk) begin
+	if (reset) begin
+		game_beats_pending <= 9'd0;
+	end else begin
+		case ({(DDRAM_RD & ~DDRAM_BUSY & ~ss_ddr_grant), (DDRAM_DOUT_READY & (game_beats_pending != 9'd0))})
+			2'b10:   game_beats_pending <= game_beats_pending + {1'b0, DDRAM_BURSTCNT};
+			2'b01:   game_beats_pending <= game_beats_pending - 9'd1;
+			2'b11:   game_beats_pending <= game_beats_pending + {1'b0, DDRAM_BURSTCNT} - 9'd1;
+			default: ;
+		endcase
+	end
+end
+
+// "bus quiet" = NESSUNA transazione DDR fisica in volo, BEAT PENDENTI COMPRESI. Letto
+// post-MUX: con grant=0 DDRAM_RD/WE valgono game_* (l'arbitro) -> transazioni del gioco.
+wire ss_bus_quiet = ~DDRAM_RD & ~DDRAM_WE & ~DDRAM_BUSY & (game_beats_pending == 9'd0);
 
 reg [3:0] ss_drain_cnt = 4'd0;
 

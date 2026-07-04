@@ -25,11 +25,12 @@ module jt6295_adpcm(
     input             [ 3:0] att,
     input             [ 3:0] data,
     output reg signed [11:0] sound,
-    // Savestate (auto_ss, modello F2). Salvo SOLO lo stato PERSISTENTE: i 3 sh_rst (busy/att/
-    // sample per canale, 68 bit). La pipeline ADPCM (reg _II/_III/_IV/_V) NON si salva: si
-    // rigenera in pochi cen dai dati a monte (regola: "se riprende in 2 cicli non serve").
-    input      [67:0]        auto_ss_in,
-    output     [67:0]        auto_ss_out,
+    // Savestate (auto_ss, modello F2). sh_rst (busy/att/sample, 67:0) + delta_idx_I (73:68).
+    // delta_idx_I = step size ADPCM persistente (retroalimentato): senza, OKI riparte da 0 al restore.
+    // Forma F2 (jt10_auto_ss): if(cen) e if(auto_ss_wr) sono due if SEPARATI nello stesso always
+    // (NON else-if) -> non rompe l'inferenza. La pipeline (_II/_III/_IV/_V) NON si salva (rigenerabile).
+    input      [73:0]        auto_ss_in,
+    output     [73:0]        auto_ss_out,
     input                    auto_ss_wr
 );
 
@@ -63,7 +64,8 @@ always @(posedge clk, posedge rst ) begin
         dn_IV   <= 12'd0;
         qn_IV   <= 12'd0;
         qn_V    <= 12'd0;
-    end else if(cen) begin
+    end else begin
+      if(cen) begin
         // I
         case( data[1:0] )
             2'd0: idx_inc_II <= 6'd2;
@@ -94,6 +96,10 @@ always @(posedge clk, posedge rst ) begin
         sign_V      <= sign_IV;
         qn_V        <= factor_IV ? qn_IV + dn_IV : qn_IV;
         delta_idx_I <= delta_idx_IV;
+      end
+      // Restore savestate — forma F2 (if SEPARATO da if(cen), non else-if). Al restore cen=0
+      // (OKI fermo in pausa) -> questo if ricarica delta_idx_I; non rompe l'inferenza dell'always.
+      if(auto_ss_wr) delta_idx_I <= auto_ss_in[73:68];
     end
 end
 
@@ -166,6 +172,9 @@ jt6295_sh_rst #(.WIDTH(12), .STAGES(4) ) u_sound(
     .auto_ss_out( auto_ss_out[67:20] ),
     .auto_ss_wr ( auto_ss_wr         )
 );
+
+// SAVE delta_idx_I (step size ADPCM persistente) via assign, fuori dall'always (forma F2).
+assign auto_ss_out[73:68] = delta_idx_I;
 
 initial begin
 lut[ 0] = 11'd0016; lut[ 1] = 11'd0017; lut[ 2] = 11'd0019; lut[ 3] = 11'd0021; lut[ 4] = 11'd0023; lut[ 5] = 11'd0025; lut[ 6] = 11'd0028;
