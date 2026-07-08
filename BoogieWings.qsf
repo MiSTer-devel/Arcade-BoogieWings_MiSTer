@@ -108,6 +108,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/mame_warning_overlay.s
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/pause_overlay.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/pause_text.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/pause_font.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/common/analog_hsize.sv
 # === HUC6280 (sound CPU H6280) — TODO ===
 set_global_assignment -name QIP_FILE rtl/jt51/jt51.qip
 # === OKIM6295 (jt6295) — 2× istanze (oki0 + oki1) via DDR3 ===

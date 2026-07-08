@@ -64,17 +64,14 @@ module ddram_4port
 	input            rd_req4,
 	output reg       rd_ack4 = 0,
 
-	// Port 5: 32-bit fetch dedicato (BG1 tile fetch, BoogieWings 5bpp).
-	// BG1 e' il layer piu' pesante (2 fetch per half + p4 = 168 trans/scanline).
-	// Spostato su DDR3 per liberare SDRAM dagli altri 3 layer + main CPU.
+	// Port 5: 32-bit fetch dedicato (OKI0 samples ADPCM, wiring boogwings_top).
+	// PRIORITA' sopra lo sprite (vedi state 0): path hard-real-time senza retry.
 	input     [27:0] rdaddr5,
 	output reg [31:0] dout5 = 0,
 	input            rd_req5,
 	output reg       rd_ack5 = 0,
 
-	// Port 6: 32-bit fetch dedicato (BG2 chip1.pf1, BoogieWings).
-	// Eliminato shared arbiter chip1 → ogni layer ha port DDR3 propria (pattern
-	// ActFancer). Conflict miss cache risolto.
+	// Port 6: 32-bit fetch dedicato (OKI1 samples ADPCM, come port 5).
 	input     [27:0] rdaddr6,
 	output reg [31:0] dout6 = 0,
 	input            rd_req6,
@@ -251,33 +248,13 @@ always @(posedge DDRAM_CLK) begin
 						state       <= 2;
 					end
 				end
-				else if(rd_req4 != rd_ack4) begin
-					if(cache_addr4[27:3] == rdaddr4[27:3]) begin
-						rd_ack4     <= rd_req4;
-						dout4       <= ram_q4[{rdaddr4[2],5'b00000} +:32];
-					end
-					else if((cache_addr4[27:3]+1'd1) == rdaddr4[27:3]) begin
-						rd_ack4     <= rd_req4;
-						ram_q4      <= next_q4;
-						dout4       <= next_q4[{rdaddr4[2],5'b00000} +:32];
-						cache_addr4 <= {rdaddr4[27:3],3'b000};
-						ram_address <= {rdaddr4[27:3]+1'd1,3'b000};
-						ram_read    <= 1;
-						ram_burst   <= 1;
-						ch 			<= 3'd3;
-						state       <= 3;
-					end
-					else begin
-						ram_address <= {rdaddr4[27:3],3'b000};
-						cache_addr4 <= {rdaddr4[27:3],3'b000};
-						ram_read    <= 1;
-						ram_burst   <= 2;
-						ch 			<= 3'd3;
-						state       <= 2;
-					end
-				end
 				else if(rd_req5 != rd_ack5) begin
-					// Port 5: 32-bit fetch BG1 tile (BoogieWings) — cache 8-byte come port 4
+					// Port 5 (OKI0) e 6 (OKI1) PRIMA del port 4 (sprite): il path ADPCM del
+					// jt6295 e' hard-real-time (deadline ~760/384 clk per slot) mentre lo
+					// sprite ha handshake e tolleranza alla coda. Con la priorita' fissa
+					// originale una raffica di miss sprite posponeva gli OKI senza limite
+					// (misurato in SIM: 90k clk pendenti) -> byte stantio = glitch. Banda OKI
+					// irrisoria (<=16 fetch/132us): lo sprite perde al max ~4 servizi/periodo.
 					if(cache_addr5[27:3] == rdaddr5[27:3]) begin
 						rd_ack5     <= rd_req5;
 						dout5       <= ram_q5[{rdaddr5[2],5'b00000} +:32];
@@ -303,7 +280,7 @@ always @(posedge DDRAM_CLK) begin
 					end
 				end
 				else if(rd_req6 != rd_ack6) begin
-					// Port 6: 32-bit fetch BG2 chip1.pf1
+					// Port 6: OKI1 (stessa priorita'-sopra-sprite del port 5)
 					if(cache_addr6[27:3] == rdaddr6[27:3]) begin
 						rd_ack6     <= rd_req6;
 						dout6       <= ram_q6[{rdaddr6[2],5'b00000} +:32];
@@ -325,6 +302,32 @@ always @(posedge DDRAM_CLK) begin
 						ram_read    <= 1;
 						ram_burst   <= 2;
 						ch 			<= 4'd5;
+						state       <= 2;
+					end
+				end
+				else if(rd_req4 != rd_ack4) begin
+					// Port 4 (sprite ROM): DOPO gli OKI (vedi commento al port 5)
+					if(cache_addr4[27:3] == rdaddr4[27:3]) begin
+						rd_ack4     <= rd_req4;
+						dout4       <= ram_q4[{rdaddr4[2],5'b00000} +:32];
+					end
+					else if((cache_addr4[27:3]+1'd1) == rdaddr4[27:3]) begin
+						rd_ack4     <= rd_req4;
+						ram_q4      <= next_q4;
+						dout4       <= next_q4[{rdaddr4[2],5'b00000} +:32];
+						cache_addr4 <= {rdaddr4[27:3],3'b000};
+						ram_address <= {rdaddr4[27:3]+1'd1,3'b000};
+						ram_read    <= 1;
+						ram_burst   <= 1;
+						ch 			<= 3'd3;
+						state       <= 3;
+					end
+					else begin
+						ram_address <= {rdaddr4[27:3],3'b000};
+						cache_addr4 <= {rdaddr4[27:3],3'b000};
+						ram_read    <= 1;
+						ram_burst   <= 2;
+						ch 			<= 3'd3;
 						state       <= 2;
 					end
 				end

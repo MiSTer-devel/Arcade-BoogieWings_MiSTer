@@ -301,16 +301,19 @@ wire [15:0] pf2_scroll_y = pf12_control[4];
 //     bit 7  = pf2 8x8 tile
 //     bit 6  = pf2 rowscroll enabled
 //     bit 5  = pf2 colscroll enabled
-// MAME deco16_pf_update condition: (control1 & 0x60) == 0x40 = bit6 set & bit5 clear.
-// control1 per pf1 = pf12_control[6] & 0xff (riga 900), per pf2 = >> 8 (riga 899).
-// Quindi pf1 rowscroll en = ctrl[6][6:5] == 2'b10. pf2 = ctrl[6][14:13] == 2'b10.
+// Rowscroll enable = BIT 6 DA SOLO (custom_tilemap_draw MAME deco16ic.cpp:481), NON
+// (control1 & 0x60)==0x40: quella condizione e' del path tilemap STANDARD (deco16ic.cpp:758)
+// che copre solo row-ONLY; con 0x60 (row+col SIMULTANEI, es. dissolvenza logo Data East)
+// MAME passa al renderer custom (:847-850) che applica bit6 e bit5 INDIPENDENTI, insieme.
+// Il vecchio ==2'b10 uccideva il rowscroll proprio nel caso 0x60 -> bande verticali senza
+// strisce fini. Nei casi 0x40/0x20/0x00 bit6-da-solo e' identico al vecchio (zero regressioni).
 // Style: ctrl[0] per pf_update (per pf1 = ctrl[5] & 0xff = bit 7:0).
 //        MAME riga 761: (control0 >> 3) & 0xf -> bit 6:3 per pf1 row style.
 //        Per pf2 = ctrl[5] >> 8 = bit 15:8, poi (>> 3) & 0xf -> bit 14:11.
 wire [3:0] pf1_rs_style = pf12_control[5][6:3];
 wire [3:0] pf2_rs_style = pf12_control[5][14:11];
-wire       pf1_rs_en    = (pf12_control[6][6:5] == 2'b10);
-wire       pf2_rs_en    = (pf12_control[6][14:13] == 2'b10);
+wire       pf1_rs_en    = pf12_control[6][6];
+wire       pf2_rs_en    = pf12_control[6][14];
 
 // COLSCROLL Y-per-column (MAME deco16ic.cpp:492-497, 812):
 //   col_type = 8 << (control0 & 7) ∈ {8,16,32,64,128,256,512,1024}
@@ -383,8 +386,13 @@ reg       pf1_go_latch, pf2_go_latch;
 // 1 riga oltre il +1 della posizione). NON tocca sc1_veff/sc2_veff (posizioni intatte).
 wire [9:0] pf1_veff_rs = pf1_latched_render_y + 10'd2 + pf1_scroll_y[9:0];
 wire [9:0] pf2_veff_rs = pf2_latched_render_y + 10'd2 + pf2_scroll_y[9:0];
-wire [10:0] pf1_rs_idx_pre = (PF1_TILE_SIZE == 8) ? {1'b0, pf1_veff_rs[9:1]} : {1'b0, pf1_veff_rs};
-wire [10:0] pf2_rs_idx_pre = (PF2_TILE_SIZE == 8) ? {1'b0, pf2_veff_rs[9:1]} : {1'b0, pf2_veff_rs};
+// 16x16: veff MASCHERATO a [8:0] (= & height_mask 511, MAME deco16ic.cpp:477/:534) PRIMA
+// dello shift. Senza mask, con scroll_y grande (dissolvenza logo Data East: bit9=1) l'indice
+// esce dalla tabella rowscroll (0x000-0x1FF) e legge l'area COLSCROLL/vuota (0x200+) ->
+// offset X ~costante su ogni riga = niente strisce fini, restano solo le bande verticali
+// del colscroll. Bit-select a costo zero (stesso pattern del fix cs_hnm).
+wire [10:0] pf1_rs_idx_pre = (PF1_TILE_SIZE == 8) ? {1'b0, pf1_veff_rs[9:1]} : {2'b00, pf1_veff_rs[8:0]};
+wire [10:0] pf2_rs_idx_pre = (PF2_TILE_SIZE == 8) ? {1'b0, pf2_veff_rs[9:1]} : {2'b00, pf2_veff_rs[8:0]};
 // Divisione per row_type via shift (row_type e' sempre potenza di 2).
 wire [3:0] pf1_rs_shift = (pf1_rs_style <= 4'd8) ? pf1_rs_style : 4'd0;
 wire [3:0] pf2_rs_shift = (pf2_rs_style <= 4'd8) ? pf2_rs_style : 4'd0;
@@ -903,8 +911,15 @@ wire [15:0] sc2_cs_value_cur = sc2_half_logical ? sc2_cs_value_h1 : sc2_cs_value
 // lenta camino -> linea nera). Il +1 di lookahead si toglie da sc2_veff sul path colscroll
 // (veff >= 1 -> no underflow). Colscroll attivo: veff_eff = render_y + scroll + cs (MAME esatto).
 // Colscroll spento: veff_eff = sc2_veff = render_y+1 = sc1_veff (sfondi allineati, no shift).
+// Il -1 vale SOLO per colscroll-ONLY (0x20 = path tilemap STANDARD MAME, dove e' stato
+// tarato e validato: camini, commit 36a9671 — NON TOCCARE quel caso). Con row+col
+// SIMULTANEI (0x60 = path custom MAME, dissolvenza logo Data East) MAME fa y=src_y+coloff
+// SENZA -1: applicarlo li' spostava il layer di 1 riga rispetto allo stato statico ->
+// SALTO del logo alla fine dell'effetto (riprodotto in SIM: tb_rs_logo CASE 5, enable
+// off con tabelle a zero = -1 riga). Con rs_en il -1 va tolto: transizione 0x60->0x00
+// continua, camini (0x20) bit-identici a prima.
 wire [9:0]  sc2_cs_off = pf2_cs_en ? sc2_cs_value_cur[9:0] : 10'd0;
-wire [9:0]  sc2_veff_eff = sc2_veff - (pf2_cs_en ? 10'd1 : 10'd0) + sc2_cs_off;
+wire [9:0]  sc2_veff_eff = sc2_veff - ((pf2_cs_en && !pf2_rs_en) ? 10'd1 : 10'd0) + sc2_cs_off;
 
 wire [5:0] sc2_col_w = (PF2_TILE_SIZE == 8) ? {1'b0, sc2_hn[8:3]} : sc2_hn[9:4];
 wire [4:0] sc2_row_w = (PF2_TILE_SIZE == 8) ? sc2_veff_eff[7:3]       : sc2_veff_eff[8:4];

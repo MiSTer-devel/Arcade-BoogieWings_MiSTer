@@ -50,6 +50,7 @@ module jt6295_rom(
 
 reg [7:0] st;
 reg [1:0] wait2;
+reg [1:0] await;   // stabilita' addr negli slot ADPCM (come wait2 per il ctrl)
 
 always @(posedge clk) begin
     if(cen4 ) st <= 8'h80;
@@ -62,7 +63,15 @@ always @(posedge clk) begin
     case(st)
         8'b1,8'b10: begin
             rom_addr   <= adpcm_addr;
-            adpcm_dout <= rom_data;
+            // HARDENING (fragilita' refit): latch SOLO con addr stabile >=2 clk e rom_ok
+            // (prima: latch cieco ogni clk, "data assumed right after two cen32 pulses").
+            // Se il dato non arriva entro la deadline resta il byte PRECEDENTE (sample
+            // ripetuto, quasi inudibile) invece di un byte di un flusso sbagliato che fa
+            // divergere il predictor ADPCM (glitch). A regime (hit cache) il valore
+            // latchato a fine slot e' identico a prima: cambia solo il caso di guasto.
+            if(await==2'b11 && rom_addr == adpcm_addr && rom_ok)
+                adpcm_dout <= rom_data;
+            await      <= (rom_addr != adpcm_addr) ? 2'b0 : {await[0],1'b1};
             ctrl_ok    <= 1'b0;
             wait2      <= 2'b0;
         end
@@ -78,6 +87,7 @@ always @(posedge clk) begin
                 wait2 <= 2'b0;
             else
                 wait2 <= {wait2[0],1'b1};
+            await <= 2'b0;   // fuori dagli slot ADPCM la finestra riparte da zero
         end
     endcase
     // restore: ultimo statement = priorita'. ctrl_ok gia' latchato dal ciclo pre-restore
@@ -86,6 +96,7 @@ always @(posedge clk) begin
     if( auto_ss_wr ) begin
         ctrl_ok <= 1'b0;
         wait2   <= 2'b0;
+        await   <= 2'b0;   // simmetrico: niente latch ADPCM coi dati pre-restore
     end
 end
 

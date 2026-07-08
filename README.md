@@ -26,10 +26,19 @@ colourful look.
 
 ## Status
 
-**Current version: 1.0** (July 2026).
+**Current version: 1.1** (July 2026).
 
 The core runs the full game with audio, inputs and savestates, tested on
 real MiSTer hardware.
+
+**New in 1.1**
+- OKI audio hardened against DDR arbitration pressure — no more starvation or
+  glitches when the design is rebuilt / the fitter reshuffles placement
+- Data East intro logo: the row+column scroll dissolve now renders as the fine
+  granular strips seen in MAME (was showing wide vertical bands), and the layer
+  no longer jumps a line when the effect ends
+- Analog VGA **H-Size** (horizontal CRT stretch) OSD option, core-side
+- Pause overlay reworked: centered logo + scrolling supporters, shared font ROM
 
 **Milestones reached**
 - Full playthrough with accurate video, audio and controls
@@ -37,12 +46,17 @@ real MiSTer hardware.
   decrypted on board during ROM download — no pre-decrypted ROMs needed
 - DECO104 protection (I/O + data scramble) reproduced from MAME
 - MAME-accurate DECO16IC tilemaps (per-row / per-column scroll) and the
-  DECO ACE alpha-blend + fade mixer
+  DECO ACE alpha-blend + fade mixer, including the simultaneous row+column
+  scroll used by the Data East intro logo dissolve
 - Savestate (save / restore) ported from the Taito F2 core, including the
   HuC6280 / YM2151 / OKI internal state
 - Native 57.8 Hz refresh with an optional 60 Hz mode
+- Hardened OKI audio path against DDR arbitration pressure (no starvation /
+  glitches when the fitter reshuffles the design)
+- Analog VGA H-Size (horizontal stretch) for CRTs, implemented core-side
 
 **Roadmap**
+- Per-channel audio mixer (independent gain for every YM2151 / OKI voice)
 - Further audio and video accuracy polish
 - Additional savestate hardening across edge cases
 - More regional ROM sets as they are verified
@@ -59,9 +73,26 @@ real MiSTer hardware.
 - Sprite ROM and OKI ADPCM ROM backed by DDR3
 - VBlank-synchronized pause (frame-aligned, no race conditions)
 - **Analog VGA H-Shift / V-Shift** OSD options for fine alignment on CRTs
+- **Analog VGA H-Size** OSD option (horizontal pixel stretch for CRTs) — see note below
 - MiSTer OSD with video and DIP options
 - Pause overlay with logo + supporters scroll
 - Savestate (save/restore) infrastructure ported from the Taito F2 core
+
+### A note on the H-Size (CRT stretch) implementation
+
+A cleaner approach exists as a module inside `sys_top`, where only the analog
+DAC is stretched and the HDMI output stays untouched. Per the MiSTer-devel
+guidelines the framework (`sys/`) must not be modified, so this core does not
+use that approach for the official release.
+
+Instead, H-Size here is implemented **core-side** (`rtl/common/analog_hsize.sv`,
+zero `sys_top` changes), which keeps the core compliant with the MiSTer-devel
+rules. The trade-off is that the stretch is applied to the whole video path:
+**while H-Size is active you cannot have a clean HDMI output at the same time
+as the horizontal resize** — HDMI follows the stretch too. The stretch itself
+is integer and line-buffered, so it is **free of shimmering or scaling
+artifacts** on the analog output. Leave H-Size Off (default) for an untouched
+HDMI image.
 
 **ROM sets supported**
 - Boogie Wings (`boogwing`, Euro v1.5, 92.12.07) — parent
@@ -175,6 +206,8 @@ Arcade-BoogieWings_MiSTer/
   DECO104 protection, DECO ACE mixer, memory maps and timing.
 - **Sorgelig** and the **MiSTer-devel team** for the framework, SDRAM
   controller and Template.
+- **Andrea Bogazzi** ([@asturur](https://github.com/asturur)) for help with the
+  core-side Analog H-Size implementation.
 
 ## Support this project
 
